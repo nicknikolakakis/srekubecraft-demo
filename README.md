@@ -22,7 +22,7 @@ Companion code for [srekubecraft.io](https://srekubecraft.io/) blog posts. Each 
 
 | Directory | Blog Post | What It Covers |
 |-----------|-----------|----------------|
-| `knative/` | _Coming soon_ | Knative Serving & Eventing |
+| `knative/` | [Knative - The Platform Engineer's Guide to Serverless on Kubernetes](https://srekubecraft.io/posts/knative/) | Knative Serving & Eventing |
 
 ## Prerequisites
 
@@ -45,4 +45,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to submit fixes or new demos.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 - see [LICENSE](LICENSE).
