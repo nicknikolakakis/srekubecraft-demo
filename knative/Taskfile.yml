@@ -1,0 +1,373 @@
+version: "3"
+
+silent: true
+
+vars:
+  CLUSTER_NAME: knative-demo
+  KNATIVE_VERSION: "1.17.0"
+  CILIUM_VERSION: "1.19.0"
+  APP_IMAGE: "ghcr.io/nicknikolakakis/srekubecraft-demo/knative-app:latest"
+
+tasks:
+  # =================================================================
+  # Pre-flight
+  # =================================================================
+  check:
+    desc: Check that all required tools are installed
+    cmds:
+      - command -v kind >/dev/null || { echo "kind not found"; exit 1; }
+      - command -v kubectl >/dev/null || { echo "kubectl not found"; exit 1; }
+      - command -v helm >/dev/null || { echo "helm not found"; exit 1; }
+      - command -v cilium >/dev/null || { echo "cilium CLI not found"; exit 1; }
+      - command -v flux >/dev/null || { echo "flux CLI not found"; exit 1; }
+      - echo "All tools found"
+
+  # =================================================================
+  # Cluster lifecycle
+  # =================================================================
+  cluster:create:
+    desc: Create Kind cluster with Cilium-ready config
+    deps: [check]
+    cmds:
+      - kind create cluster --config kubernetes/cluster/kind-config.yaml
+      - echo "Cluster {{.CLUSTER_NAME}} created"
+    status:
+      - kind get clusters | grep -q {{.CLUSTER_NAME}}
+
+  cluster:delete:
+    desc: Delete the Kind cluster
+    cmds:
+      - kind delete cluster --name {{.CLUSTER_NAME}}
+      - rm -rf /tmp/{{.CLUSTER_NAME}}
+
+  # =================================================================
+  # CNI
+  # =================================================================
+  cilium:install:
+    desc: Install Cilium as the CNI
+    deps: [cluster:create]
+    cmds:
+      - helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+      - helm repo update cilium
+      - >-
+        helm upgrade --install cilium cilium/cilium
+        --version {{.CILIUM_VERSION}}
+        --namespace kube-system
+        --set image.pullPolicy=IfNotPresent
+        --set ipam.mode=kubernetes
+        --set kubeProxyReplacement=true
+        --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}"
+        --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}"
+        --set cgroup.autoMount.enabled=false
+        --set cgroup.hostRoot=/sys/fs/cgroup
+        --set k8sServiceHost={{.CLUSTER_NAME}}-control-plane
+        --set k8sServicePort=6443
+        --set hubble.relay.enabled=true
+        --set hubble.ui.enabled=true
+        --wait --timeout 5m
+      - cilium status --wait
+      - kubectl wait --for=condition=Ready nodes --all --timeout=120s
+
+  # =================================================================
+  # Flux
+  # =================================================================
+  flux:install:
+    desc: Bootstrap Flux on the cluster
+    deps: [cilium:install]
+    cmds:
+      - flux install
+      - flux check
+
+  flux:apply:
+    desc: Apply Flux sources and releases for Knative
+    deps: [flux:install]
+    cmds:
+      - kubectl apply -f kubernetes/flux/namespace.yaml
+      - kubectl apply -f kubernetes/flux/sources.yaml
+      - kubectl apply -f kubernetes/flux/knative-serving.yaml
+      - kubectl apply -f kubernetes/flux/knative-eventing.yaml
+      - echo "Flux Kustomizations applied. Reconciling..."
+
+  # =================================================================
+  # Knative (direct install via kn CLI)
+  # =================================================================
+  knative:install:
+    desc: Install Knative Serving + Eventing using kubectl (alternative to Flux)
+    deps: [cilium:install]
+    cmds:
+      - echo "==> Installing Knative Serving CRDs and core..."
+      - kubectl apply -f "https://github.com/knative/serving/releases/download/knative-v{{.KNATIVE_VERSION}}/serving-crds.yaml"
+      - kubectl apply -f "https://github.com/knative/serving/releases/download/knative-v{{.KNATIVE_VERSION}}/serving-core.yaml"
+      - echo "==> Installing Kourier..."
+      - kubectl apply -f "https://github.com/knative/net-kourier/releases/download/knative-v{{.KNATIVE_VERSION}}/kourier.yaml"
+      - |
+        kubectl patch configmap/config-network \
+          --namespace knative-serving \
+          --type merge \
+          --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+      - echo "==> Configuring Magic DNS (sslip.io)..."
+      - kubectl apply -f "https://github.com/knative/serving/releases/download/knative-v{{.KNATIVE_VERSION}}/serving-default-domain.yaml"
+      - echo "==> Installing Knative Eventing CRDs and core..."
+      - kubectl apply -f "https://github.com/knative/eventing/releases/download/knative-v{{.KNATIVE_VERSION}}/eventing-crds.yaml"
+      - kubectl apply -f "https://github.com/knative/eventing/releases/download/knative-v{{.KNATIVE_VERSION}}/eventing-core.yaml"
+      - kubectl apply -f "https://github.com/knative/eventing/releases/download/knative-v{{.KNATIVE_VERSION}}/in-memory-channel.yaml"
+      - kubectl apply -f "https://github.com/knative/eventing/releases/download/knative-v{{.KNATIVE_VERSION}}/mt-channel-broker.yaml"
+      - echo "==> Waiting for Knative Serving..."
+      - kubectl wait --for=condition=available deployment --all -n knative-serving --timeout=300s
+      - echo "==> Waiting for Knative Eventing..."
+      - kubectl wait --for=condition=available deployment --all -n knative-eventing --timeout=300s
+      - echo "==> Configuring tag resolution for local images..."
+      - |
+        kubectl patch configmap/config-deployment \
+          --namespace knative-serving \
+          --type merge \
+          --patch '{"data":{"registries-skipping-tag-resolving":"kind.local,ko.local,dev.local,ghcr.io"}}'
+      - echo "==> Enabling secure pod defaults (Pod Security Standards)..."
+      - |
+        kubectl patch configmap/config-features \
+          --namespace knative-serving \
+          --type merge \
+          --patch '{"data":{"kubernetes.podspec-securitycontext":"enabled"}}'
+      - echo "==> Knative installation complete!"
+
+  knative:status:
+    desc: Check Knative component status
+    cmds:
+      - echo "==> Knative Serving pods:"
+      - kubectl get pods -n knative-serving
+      - echo ""
+      - echo "==> Knative Eventing pods:"
+      - kubectl get pods -n knative-eventing
+      - echo ""
+      - echo "==> Knative Services:"
+      - kn service list 2>/dev/null || echo "No services found"
+
+  # =================================================================
+  # Metrics Server
+  # =================================================================
+  metrics-server:install:
+    desc: Install Kubernetes Metrics Server for resource monitoring
+    deps: [cilium:install, knative:install]
+    cmds:
+      - helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ || exit 1
+      - helm repo update metrics-server
+      - >-
+        helm upgrade --install metrics-server metrics-server/metrics-server
+        --namespace kube-system
+        --create-namespace
+        --set 'args[0]=--kubelet-insecure-tls'
+        --wait
+
+  # =================================================================
+  # App - Build and load
+  # =================================================================
+  app:build:
+    desc: Build the demo app container image
+    dir: app
+    cmds:
+      - docker build -t {{.APP_IMAGE}} .
+
+  app:load:
+    desc: Load the app image into Kind
+    deps: [app:build]
+    cmds:
+      - kind load docker-image {{.APP_IMAGE}} --name {{.CLUSTER_NAME}}
+
+  # =================================================================
+  # Demo 1 - Serving basics
+  # =================================================================
+  demo:serving:
+    desc: "Demo 1: Deploy a Knative Service and test scale-to-zero"
+    deps: [app:load]
+    cmds:
+      - echo "==> Creating hello-knative service via kn CLI..."
+      - |
+        kn service create hello-knative \
+          --image {{.APP_IMAGE}} \
+          --port 8080 \
+          --annotation autoscaling.knative.dev/min-scale=0 \
+          --annotation autoscaling.knative.dev/max-scale=5 \
+          --annotation autoscaling.knative.dev/target=10 \
+          --request cpu=100m,memory=64Mi \
+          --limit cpu=500m,memory=128Mi \
+          --pull-policy Never \
+          --security-context strict
+      - echo ""
+      - echo "==> Service URL:"
+      - kn service describe hello-knative -o url
+      - echo ""
+      - echo "==> Testing service from inside the cluster..."
+      - kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- curl -s http://hello-knative.default.svc.cluster.local
+      - echo ""
+      - echo "==> Pods running:"
+      - kubectl get pods -l serving.knative.dev/service=hello-knative
+      - echo ""
+      - echo "==> Watch scale-to-zero (wait 60s with no traffic):"
+      - echo "    kubectl get pods -l serving.knative.dev/service=hello-knative -w"
+      - echo ""
+      - echo "==> Then trigger a cold start:"
+      - echo "    kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- curl -s http://hello-knative.default.svc.cluster.local"
+
+  # =================================================================
+  # Demo 2 - Autoscaling
+  # =================================================================
+  demo:autoscale:
+    desc: "Demo 2: Autoscaling with load generation"
+    deps: [app:load]
+    cmds:
+      - echo "==> Creating autoscale-demo service..."
+      - |
+        kn service create autoscale-demo \
+          --image {{.APP_IMAGE}} \
+          --port 8080 \
+          --annotation autoscaling.knative.dev/class=kpa.autoscaling.knative.dev \
+          --annotation autoscaling.knative.dev/metric=concurrency \
+          --annotation autoscaling.knative.dev/target=5 \
+          --annotation autoscaling.knative.dev/min-scale=0 \
+          --annotation autoscaling.knative.dev/max-scale=10 \
+          --request cpu=100m,memory=64Mi \
+          --limit cpu=500m,memory=128Mi \
+          --pull-policy Never \
+          --security-context strict
+      - echo ""
+      - echo "==> Service URL:"
+      - kn service describe autoscale-demo -o url
+      - echo ""
+      - echo "==> Testing service..."
+      - kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- curl -s http://autoscale-demo.default.svc.cluster.local
+      - echo ""
+      - echo "==> Generating load from inside the cluster (30s, 50 concurrent)..."
+      - echo "    Run in another terminal:"
+      - echo "    kubectl run load-test --rm -it --restart=Never --image=williamyeh/hey -- -z 30s -c 50 http://autoscale-demo.default.svc.cluster.local/burn?duration=2"
+      - echo ""
+      - echo "==> Watch pods scaling up:"
+      - echo "    kubectl get pods -l serving.knative.dev/service=autoscale-demo -w"
+
+  # =================================================================
+  # Demo 3 - Traffic splitting
+  # =================================================================
+  demo:canary:
+    desc: "Demo 3: Canary deployment with traffic splitting"
+    deps: [app:load]
+    cmds:
+      - echo "==> Creating canary-demo v1..."
+      - |
+        kn service create canary-demo \
+          --image {{.APP_IMAGE}} \
+          --port 8080 \
+          --env VERSION=v1 \
+          --annotation autoscaling.knative.dev/min-scale=1 \
+          --revision-name canary-demo-v1 \
+          --pull-policy Never \
+          --security-context strict
+      - echo ""
+      - echo "==> Updating to v2 with 90/10 traffic split..."
+      - |
+        kn service update canary-demo \
+          --env VERSION=v2 \
+          --revision-name canary-demo-v2 \
+          --traffic canary-demo-v1=90 \
+          --traffic canary-demo-v2=10 \
+          --tag canary-demo-v2=canary
+      - echo ""
+      - echo "==> Traffic distribution:"
+      - kn revision list
+      - echo ""
+      - echo "==> Sending 100 requests to see traffic split..."
+      - |
+        for i in $(seq 1 100); do
+          kubectl run "curl-test-$i" --rm -it --restart=Never --image=curlimages/curl -- curl -s http://canary-demo.default.svc.cluster.local 2>/dev/null | grep -o '"hostname":"[^"]*"' >> /tmp/canary-results.txt 2>/dev/null || true
+        done
+        echo ""
+        echo "==> Traffic distribution:"
+        sort /tmp/canary-results.txt | uniq -c | sort -rn
+        rm -f /tmp/canary-results.txt
+      - echo ""
+      - echo "==> Promote v2 to 100%:"
+      - echo "    kn service update canary-demo --traffic @latest=100"
+
+  # =================================================================
+  # Demo 4 - Eventing
+  # =================================================================
+  demo:eventing:
+    desc: "Demo 4: Event-driven architecture with Broker, PingSource, and ApiServerSource"
+    deps: [app:load]
+    cmds:
+      - echo "==> Creating event-display sink service..."
+      - |
+        kn service create event-display \
+          --image {{.APP_IMAGE}} \
+          --port 8080 \
+          --annotation autoscaling.knative.dev/min-scale=1 \
+          --request cpu=50m,memory=64Mi \
+          --limit cpu=200m,memory=128Mi \
+          --pull-policy Never \
+          --security-context strict
+      - echo ""
+      - echo "==> Creating Broker..."
+      - kubectl apply -f kubernetes/eventing/01-broker.yaml
+      - kubectl wait --for=condition=ready broker/default --timeout=60s
+      - echo ""
+      - echo "==> Creating PingSource (heartbeat every minute)..."
+      - kubectl apply -f kubernetes/eventing/03-ping-source.yaml
+      - echo ""
+      - echo "==> Creating Trigger (routes ping events to event-display)..."
+      - kubectl apply -f kubernetes/eventing/04-trigger.yaml
+      - echo ""
+      - echo "==> Setting up ApiServerSource (watches pod changes)..."
+      - kubectl apply -f kubernetes/eventing/05-api-server-source.yaml
+      - kubectl apply -f kubernetes/eventing/06-pod-trigger.yaml
+      - echo ""
+      - echo "==> Eventing pipeline deployed! Watch events:"
+      - echo "    kubectl logs -l serving.knative.dev/service=event-display -c user-container -f"
+
+  # =================================================================
+  # Full setup
+  # =================================================================
+  setup:
+    desc: Full setup - cluster, Cilium, Knative, build app
+    cmds:
+      - task: cluster:create
+      - task: cilium:install
+      - task: metrics-server:install
+      - task: knative:install
+      - task: app:build
+      - task: app:load
+      - echo ""
+      - echo "==> Setup complete! Run demos:"
+      - echo "    task demo:serving"
+      - echo "    task demo:autoscale"
+      - echo "    task demo:canary"
+      - echo "    task demo:eventing"
+
+  setup:flux:
+    desc: Full setup using Flux for GitOps-based Knative install
+    cmds:
+      - task: cluster:create
+      - task: cilium:install
+      - task: metrics-server:install
+      - task: flux:install
+      - task: flux:apply
+      - task: app:build
+      - task: app:load
+      - echo ""
+      - echo "==> Flux-based setup initiated. Monitor reconciliation:"
+      - echo "    flux get kustomizations -w"
+
+  # =================================================================
+  # Cleanup
+  # =================================================================
+  clean:services:
+    desc: Delete all Knative demo services
+    cmds:
+      - kn service delete hello-knative 2>/dev/null || true
+      - kn service delete autoscale-demo 2>/dev/null || true
+      - kn service delete canary-demo 2>/dev/null || true
+      - kn service delete event-display 2>/dev/null || true
+      - kubectl delete -f kubernetes/eventing/ --ignore-not-found
+      - echo "==> All demo resources cleaned"
+
+  clean:
+    desc: Delete everything including the cluster
+    cmds:
+      - task: cluster:delete

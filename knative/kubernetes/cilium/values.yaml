@@ -1,0 +1,15 @@
+kubeProxyReplacement: true
+k8sServiceHost: knative-demo-control-plane
+k8sServicePort: 6443
+
+ipam:
+  mode: kubernetes
+
+hubble:
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+
+operator:
+  replicas: 1

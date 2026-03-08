@@ -1,0 +1,6 @@
+version: "3"
+
+includes:
+  knative:
+    taskfile: knative/Taskfile.yml
+    dir: knative

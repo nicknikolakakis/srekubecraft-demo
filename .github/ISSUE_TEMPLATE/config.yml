@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/nicknikolakakis/srekubecraft-demo/discussions
+    about: Ask questions and discuss ideas
+  - name: Blog
+    url: https://srekubecraft.io/
+    about: Read the blog posts that accompany these demos

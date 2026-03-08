@@ -1,0 +1,33 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: canary-demo
+  namespace: default
+spec:
+  template:
+    metadata:
+      name: canary-demo-v2
+      annotations:
+        autoscaling.knative.dev/min-scale: "1"
+        autoscaling.knative.dev/max-scale: "3"
+    spec:
+      containers:
+        - image: ko://github.com/nicknikolakakis/srekubecraft-demo/knative/app
+          ports:
+            - containerPort: 8080
+          env:
+            - name: VERSION
+              value: "v2"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+  traffic:
+    - revisionName: canary-demo-v1
+      percent: 90
+    - revisionName: canary-demo-v2
+      percent: 10
+      tag: canary

@@ -1,0 +1,67 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: knative-demo
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+  # Disable default CNI - Cilium will be installed as the CNI
+  disableDefaultCNI: true
+  # Disable kube-proxy - Cilium replaces it with eBPF
+  kubeProxyMode: "none"
+nodes:
+  # --- Control Plane ---
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            audit-log-path: /var/log/kubernetes/audit.log
+            audit-log-maxage: "7"
+            audit-log-maxbackup: "3"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+      - containerPort: 30000
+        hostPort: 30000
+        protocol: TCP
+    extraMounts:
+      - hostPath: /tmp/knative-demo/control-plane
+        containerPath: /var/local-path-provisioner
+
+  # --- Worker 1 ---
+  - role: worker
+    labels:
+      workload: apps
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraMounts:
+      - hostPath: /tmp/knative-demo/worker-1
+        containerPath: /var/local-path-provisioner
+
+  # --- Worker 2 ---
+  - role: worker
+    labels:
+      workload: apps
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraMounts:
+      - hostPath: /tmp/knative-demo/worker-2
+        containerPath: /var/local-path-provisioner

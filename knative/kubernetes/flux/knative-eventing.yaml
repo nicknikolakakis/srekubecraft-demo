@@ -1,0 +1,61 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-eventing-crds
+  namespace: flux-system
+spec:
+  interval: 1h
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-eventing-crds
+  path: ./crds
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-eventing-core
+  namespace: flux-system
+spec:
+  interval: 1h
+  dependsOn:
+    - name: knative-eventing-crds
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-eventing-crds
+  path: ./core
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-eventing-channels
+  namespace: flux-system
+spec:
+  interval: 1h
+  dependsOn:
+    - name: knative-eventing-core
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-eventing-crds
+  path: ./in-memory-channel
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-eventing-broker
+  namespace: flux-system
+spec:
+  interval: 1h
+  dependsOn:
+    - name: knative-eventing-channels
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-eventing-crds
+  path: ./mt-channel-broker
+  wait: true

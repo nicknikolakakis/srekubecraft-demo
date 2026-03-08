@@ -1,0 +1,32 @@
+name: Slash Command - Assign
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  assign:
+    if: >
+      github.event.issue &&
+      startsWith(github.event.comment.body, '/assign')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const comment = context.payload.comment.body.trim();
+            const issue = context.payload.issue;
+            const commenter = context.payload.comment.user.login;
+            if (comment.startsWith('/unassign')) {
+              await github.rest.issues.removeAssignees({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number, assignees: [commenter],
+              });
+              return;
+            }
+            const match = comment.match(/\/assign\s+@?(\S+)/);
+            const assignee = match ? match[1] : commenter;
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: issue.number, assignees: [assignee],
+            });

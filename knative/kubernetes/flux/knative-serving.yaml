@@ -1,0 +1,45 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-serving-crds
+  namespace: flux-system
+spec:
+  interval: 1h
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-serving-crds
+  path: ./crds
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-serving-core
+  namespace: flux-system
+spec:
+  interval: 1h
+  dependsOn:
+    - name: knative-serving-crds
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-serving-crds
+  path: ./core
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: knative-kourier
+  namespace: flux-system
+spec:
+  interval: 1h
+  dependsOn:
+    - name: knative-serving-core
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: knative-serving-crds
+  path: ./kourier
+  wait: true

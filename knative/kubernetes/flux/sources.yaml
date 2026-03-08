@@ -1,0 +1,30 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cilium
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://helm.cilium.io/
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: knative-serving-crds
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: oci://ghcr.io/knative/serving
+  ref:
+    tag: knative-v1.17.0
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: knative-eventing-crds
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: oci://ghcr.io/knative/eventing
+  ref:
+    tag: knative-v1.17.0
