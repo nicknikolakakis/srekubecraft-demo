@@ -23,6 +23,7 @@ Companion code for [srekubecraft.io](https://srekubecraft.io/) blog posts. Each 
 | Directory | Blog Post | What It Covers |
 |-----------|-----------|----------------|
 | `knative/` | [Knative - The Platform Engineer's Guide to Serverless on Kubernetes](https://srekubecraft.io/posts/knative/) | Knative Serving & Eventing |
+| `oauth2-proxy-mcp/` | [OAuth2-Proxy - Securing MCP Servers on Kubernetes](https://srekubecraft.io/posts/oauth2-proxy/) | OAuth2-Proxy sidecar + DBHub MCP + NetworkPolicies |
 
 ## Prerequisites
 
