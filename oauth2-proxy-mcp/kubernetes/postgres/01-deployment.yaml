@@ -1,0 +1,117 @@
+# =============================================================================
+# PostgreSQL - sample database for DBHub MCP server
+# Includes init script with sample data and read-only user
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: mcp-auth
+data:
+  init.sql: |
+    -- Create sample database
+    CREATE DATABASE sampledb;
+    \c sampledb;
+
+    -- Create tables with sample data
+    CREATE TABLE employees (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      department VARCHAR(50) NOT NULL,
+      email VARCHAR(100) UNIQUE NOT NULL,
+      hire_date DATE NOT NULL DEFAULT CURRENT_DATE
+    );
+
+    INSERT INTO employees (name, department, email, hire_date) VALUES
+      ('Alice Chen', 'Platform Engineering', 'alice@example.com', '2023-01-15'),
+      ('Bob Kumar', 'SRE', 'bob@example.com', '2023-03-22'),
+      ('Carol Santos', 'Security', 'carol@example.com', '2023-06-01'),
+      ('Dave Park', 'DevOps', 'dave@example.com', '2024-01-10'),
+      ('Eve Johnson', 'Platform Engineering', 'eve@example.com', '2024-04-18');
+
+    CREATE TABLE incidents (
+      id SERIAL PRIMARY KEY,
+      title VARCHAR(200) NOT NULL,
+      severity VARCHAR(10) CHECK (severity IN ('P1', 'P2', 'P3', 'P4')),
+      status VARCHAR(20) DEFAULT 'open',
+      assignee_id INTEGER REFERENCES employees(id),
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    INSERT INTO incidents (title, severity, status, assignee_id) VALUES
+      ('Database connection pool exhaustion', 'P1', 'resolved', 2),
+      ('Certificate expiry on staging', 'P3', 'open', 3),
+      ('Memory leak in payment service', 'P2', 'investigating', 1),
+      ('DNS resolution timeout', 'P2', 'resolved', 4);
+
+    -- Create read-only user for DBHub
+    CREATE USER readonly_user WITH PASSWORD 'readonly_pass';
+    GRANT CONNECT ON DATABASE sampledb TO readonly_user;
+    GRANT USAGE ON SCHEMA public TO readonly_user;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO readonly_user;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO readonly_user;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: mcp-auth
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/managed-by: taskfile
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: "admin"
+            - name: POSTGRES_PASSWORD
+              value: "admin_pass"
+          ports:
+            - containerPort: 5432
+              name: postgres
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: postgres-init
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: mcp-auth
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - port: 5432
+      targetPort: postgres
+      protocol: TCP
+      name: postgres

@@ -1,0 +1,9 @@
+# =============================================================================
+# Namespace for MCP servers
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-servers
+  labels:
+    app.kubernetes.io/name: mcp-servers

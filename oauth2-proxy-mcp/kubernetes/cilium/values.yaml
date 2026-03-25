@@ -1,0 +1,13 @@
+# =============================================================================
+# Cilium CNI values for Kind cluster
+# =============================================================================
+kubeProxyReplacement: true
+ipam:
+  mode: kubernetes
+hubble:
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+operator:
+  replicas: 1

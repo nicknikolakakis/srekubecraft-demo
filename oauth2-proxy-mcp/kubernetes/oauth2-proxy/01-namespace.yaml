@@ -1,0 +1,9 @@
+# =============================================================================
+# Namespace for OAuth2-Proxy
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-auth
+  labels:
+    app.kubernetes.io/name: oauth2-proxy

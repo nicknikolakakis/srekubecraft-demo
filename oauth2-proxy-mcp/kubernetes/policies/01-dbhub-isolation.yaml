@@ -1,0 +1,101 @@
+# =============================================================================
+# NetworkPolicy - restrict DBHub MCP server traffic
+# Only allows: inbound from Envoy Gateway, outbound to PostgreSQL + DNS
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dbhub-isolation
+  namespace: mcp-servers
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dbhub
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only allow traffic from Envoy Gateway
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow connection to PostgreSQL
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-auth
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+---
+# =============================================================================
+# NetworkPolicy - restrict DBHub sidecar traffic
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dbhub-sidecar-isolation
+  namespace: mcp-servers
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dbhub-sidecar
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only allow traffic from Envoy Gateway to OAuth2-Proxy sidecar
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+      ports:
+        - port: 4180
+          protocol: TCP
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow connection to PostgreSQL
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-auth
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Allow OAuth2-Proxy to reach GitHub (IdP) externally
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
