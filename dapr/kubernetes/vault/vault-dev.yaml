@@ -1,0 +1,94 @@
+# =============================================================================
+# HashiCorp Vault — dev mode deployment for demo purposes
+# NOT for production: dev mode stores everything in-memory, auto-unseals,
+# and uses a known root token.
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault-system
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/managed-by: taskfile
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: vault-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: vault-system
+  labels:
+    app.kubernetes.io/name: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault
+    spec:
+      serviceAccountName: vault
+      containers:
+        - name: vault
+          image: "hashicorp/vault:1.21"
+          args:
+            - "server"
+            - "-dev"
+            - "-dev-root-token-id=demo-root-token"
+            - "-dev-listen-address=0.0.0.0:8200"
+          ports:
+            - containerPort: 8200
+              name: http
+              protocol: TCP
+          env:
+            - name: VAULT_DEV_ROOT_TOKEN_ID
+              value: "demo-root-token"
+            - name: VAULT_ADDR
+              value: "http://127.0.0.1:8200"
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: vault-system
+  labels:
+    app.kubernetes.io/name: vault
+spec:
+  selector:
+    app.kubernetes.io/name: vault
+  ports:
+    - port: 8200
+      targetPort: 8200
+      protocol: TCP
+      name: http

@@ -1,0 +1,35 @@
+# =============================================================================
+# Dapr Configuration — mTLS between sidecars, Prometheus metrics
+# Applied cluster-wide; per-app overrides via annotations on Deployments
+# =============================================================================
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: dapr-config
+  namespace: dapr-system
+spec:
+  # --- mTLS ---
+  mtls:
+    enabled: true
+    workloadCertTTL: "24h"
+    allowedClockSkew: "15m"
+    controlPlaneTrustDomain: "cluster.local"
+    sentryAddress: "dapr-sentry.dapr-system.svc.cluster.local:443"
+  # --- Metrics (scraped by Prometheus via ServiceMonitor) ---
+  metrics:
+    enabled: true
+  # --- API access control ---
+  api:
+    allowed:
+      - name: state
+        version: v1.0
+        protocol: http
+      - name: secrets
+        version: v1.0
+        protocol: http
+      - name: bindings
+        version: v1.0
+        protocol: http
+      - name: invoke
+        version: v1.0
+        protocol: http

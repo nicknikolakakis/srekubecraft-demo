@@ -1,79 +1,20 @@
 version: "3"
 silent: true
 
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "openssl jq"
+
 vars:
   CLUSTER_NAME: oauth2-proxy-mcp-demo
-  CILIUM_VERSION: "1.19.0"
+  CILIUM_VERSION: "1.19.3"
   OAUTH2_PROXY_VERSION: "v7.15.1"
 
 tasks:
-  # ===========================================================================
-  # Pre-flight checks
-  # ===========================================================================
-  check:
-    desc: Verify required tools are installed
-    cmds:
-      - |
-        echo "Checking required tools..."
-        for cmd in kind kubectl helm cilium openssl jq; do
-          if ! command -v $cmd &> /dev/null; then
-            echo "ERROR: $cmd is not installed"
-            exit 1
-          fi
-        done
-        echo "All tools found."
-
-  # ===========================================================================
-  # Cluster lifecycle
-  # ===========================================================================
-  cluster:create:
-    desc: Create Kind cluster with Cilium CNI
-    cmds:
-      - echo "Creating Kind cluster '{{.CLUSTER_NAME}}'..."
-      - kind create cluster --config kubernetes/cluster/kind-config.yaml --wait 60s
-      - echo "Cluster created."
-    status:
-      - kind get clusters 2>/dev/null | grep -q "{{.CLUSTER_NAME}}"
-
-  cluster:delete:
-    desc: Delete Kind cluster
-    cmds:
-      - echo "Deleting Kind cluster '{{.CLUSTER_NAME}}'..."
-      - kind delete cluster --name {{.CLUSTER_NAME}}
-      - echo "Cluster deleted."
-
-  # ===========================================================================
-  # Cilium CNI
-  # ===========================================================================
-  cilium:install:
-    desc: Install Cilium as the CNI
-    deps: [cluster:create]
-    cmds:
-      - echo "Installing Cilium {{.CILIUM_VERSION}}..."
-      - helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-      - helm repo update cilium
-      - >-
-        helm upgrade --install cilium cilium/cilium
-        --version {{.CILIUM_VERSION}}
-        --namespace kube-system
-        --set image.pullPolicy=IfNotPresent
-        --set ipam.mode=kubernetes
-        --set kubeProxyReplacement=true
-        --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}"
-        --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}"
-        --set cgroup.autoMount.enabled=false
-        --set cgroup.hostRoot=/sys/fs/cgroup
-        --set k8sServiceHost={{.CLUSTER_NAME}}-control-plane
-        --set k8sServicePort=6443
-        --set hubble.relay.enabled=true
-        --set hubble.ui.enabled=true
-        --wait --timeout 5m
-      - cilium status --wait
-      - kubectl wait --for=condition=Ready nodes --all --timeout=120s
-      - echo "Cilium installed. All nodes ready."
-    status:
-      - helm list -n kube-system 2>/dev/null | grep -q cilium
-
   # ===========================================================================
   # Infrastructure: Namespaces + Redis + PostgreSQL
   # ===========================================================================
@@ -182,11 +123,11 @@ tasks:
   # Full setup
   # ===========================================================================
   setup:
-    desc: Full setup - cluster, infra, and DBHub with OAuth2-Proxy
+    desc: Full setup — cluster, infra, and DBHub with OAuth2-Proxy
     cmds:
-      - task: check
-      - task: cluster:create
-      - task: cilium:install
+      - task: shared:check
+      - task: shared:cluster:create
+      - task: shared:cilium:install
       - task: infra:namespaces
       - task: infra:redis
       - task: infra:postgres
@@ -219,4 +160,4 @@ tasks:
   clean:
     desc: Delete everything including the cluster
     cmds:
-      - task: cluster:delete
+      - task: shared:cluster:delete

@@ -2,85 +2,26 @@ version: "3"
 
 silent: true
 
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "flux kn"
+
 vars:
   CLUSTER_NAME: knative-demo
   KNATIVE_VERSION: "1.17.0"
-  CILIUM_VERSION: "1.19.0"
+  CILIUM_VERSION: "1.19.3"
   APP_IMAGE: "ghcr.io/nicknikolakakis/srekubecraft-demo/knative-app:latest"
 
 tasks:
   # =================================================================
-  # Pre-flight
+  # Flux — Knative-specific sources and releases
   # =================================================================
-  check:
-    desc: Check that all required tools are installed
-    cmds:
-      - command -v kind >/dev/null || { echo "kind not found"; exit 1; }
-      - command -v kubectl >/dev/null || { echo "kubectl not found"; exit 1; }
-      - command -v helm >/dev/null || { echo "helm not found"; exit 1; }
-      - command -v cilium >/dev/null || { echo "cilium CLI not found"; exit 1; }
-      - command -v flux >/dev/null || { echo "flux CLI not found"; exit 1; }
-      - echo "All tools found"
-
-  # =================================================================
-  # Cluster lifecycle
-  # =================================================================
-  cluster:create:
-    desc: Create Kind cluster with Cilium-ready config
-    deps: [check]
-    cmds:
-      - kind create cluster --config kubernetes/cluster/kind-config.yaml
-      - echo "Cluster {{.CLUSTER_NAME}} created"
-    status:
-      - kind get clusters | grep -q {{.CLUSTER_NAME}}
-
-  cluster:delete:
-    desc: Delete the Kind cluster
-    cmds:
-      - kind delete cluster --name {{.CLUSTER_NAME}}
-      - rm -rf /tmp/{{.CLUSTER_NAME}}
-
-  # =================================================================
-  # CNI
-  # =================================================================
-  cilium:install:
-    desc: Install Cilium as the CNI
-    deps: [cluster:create]
-    cmds:
-      - helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-      - helm repo update cilium
-      - >-
-        helm upgrade --install cilium cilium/cilium
-        --version {{.CILIUM_VERSION}}
-        --namespace kube-system
-        --set image.pullPolicy=IfNotPresent
-        --set ipam.mode=kubernetes
-        --set kubeProxyReplacement=true
-        --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}"
-        --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}"
-        --set cgroup.autoMount.enabled=false
-        --set cgroup.hostRoot=/sys/fs/cgroup
-        --set k8sServiceHost={{.CLUSTER_NAME}}-control-plane
-        --set k8sServicePort=6443
-        --set hubble.relay.enabled=true
-        --set hubble.ui.enabled=true
-        --wait --timeout 5m
-      - cilium status --wait
-      - kubectl wait --for=condition=Ready nodes --all --timeout=120s
-
-  # =================================================================
-  # Flux
-  # =================================================================
-  flux:install:
-    desc: Bootstrap Flux on the cluster
-    deps: [cilium:install]
-    cmds:
-      - flux install
-      - flux check
-
   flux:apply:
     desc: Apply Flux sources and releases for Knative
-    deps: [flux:install]
     cmds:
       - kubectl apply -f kubernetes/flux/namespace.yaml
       - kubectl apply -f kubernetes/flux/sources.yaml
@@ -93,7 +34,6 @@ tasks:
   # =================================================================
   knative:install:
     desc: Install Knative Serving + Eventing using kubectl (alternative to Flux)
-    deps: [cilium:install]
     cmds:
       - echo "==> Installing Knative Serving CRDs and core..."
       - kubectl apply -f "https://github.com/knative/serving/releases/download/knative-v{{.KNATIVE_VERSION}}/serving-crds.yaml"
@@ -143,23 +83,7 @@ tasks:
       - kn service list 2>/dev/null || echo "No services found"
 
   # =================================================================
-  # Metrics Server
-  # =================================================================
-  metrics-server:install:
-    desc: Install Kubernetes Metrics Server for resource monitoring
-    deps: [cilium:install, knative:install]
-    cmds:
-      - helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ || exit 1
-      - helm repo update metrics-server
-      - >-
-        helm upgrade --install metrics-server metrics-server/metrics-server
-        --namespace kube-system
-        --create-namespace
-        --set 'args[0]=--kubelet-insecure-tls'
-        --wait
-
-  # =================================================================
-  # App - Build and load
+  # App — Build and load
   # =================================================================
   app:build:
     desc: Build the demo app container image
@@ -174,7 +98,7 @@ tasks:
       - kind load docker-image {{.APP_IMAGE}} --name {{.CLUSTER_NAME}}
 
   # =================================================================
-  # Demo 1 - Serving basics
+  # Demo 1 — Serving basics
   # =================================================================
   demo:serving:
     desc: "Demo 1: Deploy a Knative Service and test scale-to-zero"
@@ -209,7 +133,7 @@ tasks:
       - echo "    kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- curl -s http://hello-knative.default.svc.cluster.local"
 
   # =================================================================
-  # Demo 2 - Autoscaling
+  # Demo 2 — Autoscaling
   # =================================================================
   demo:autoscale:
     desc: "Demo 2: Autoscaling with load generation"
@@ -244,7 +168,7 @@ tasks:
       - echo "    kubectl get pods -l serving.knative.dev/service=autoscale-demo -w"
 
   # =================================================================
-  # Demo 3 - Traffic splitting
+  # Demo 3 — Traffic splitting
   # =================================================================
   demo:canary:
     desc: "Demo 3: Canary deployment with traffic splitting"
@@ -287,7 +211,7 @@ tasks:
       - echo "    kn service update canary-demo --traffic @latest=100"
 
   # =================================================================
-  # Demo 4 - Eventing
+  # Demo 4 — Eventing
   # =================================================================
   demo:eventing:
     desc: "Demo 4: Event-driven architecture with Broker, PingSource, and ApiServerSource"
@@ -325,12 +249,12 @@ tasks:
   # Full setup
   # =================================================================
   setup:
-    desc: Full setup - cluster, Cilium, Knative, build app
+    desc: Full setup — cluster, Cilium, Knative, build app
     cmds:
-      - task: cluster:create
-      - task: cilium:install
-      - task: metrics-server:install
+      - task: shared:cluster:create
+      - task: shared:cilium:install
       - task: knative:install
+      - task: shared:metrics-server:install
       - task: app:build
       - task: app:load
       - echo ""
@@ -343,10 +267,10 @@ tasks:
   setup:flux:
     desc: Full setup using Flux for GitOps-based Knative install
     cmds:
-      - task: cluster:create
-      - task: cilium:install
-      - task: metrics-server:install
-      - task: flux:install
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - task: shared:metrics-server:install
+      - task: shared:flux:install
       - task: flux:apply
       - task: app:build
       - task: app:load
@@ -370,4 +294,4 @@ tasks:
   clean:
     desc: Delete everything including the cluster
     cmds:
-      - task: cluster:delete
+      - task: shared:cluster:delete

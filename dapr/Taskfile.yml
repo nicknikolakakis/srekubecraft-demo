@@ -1,0 +1,209 @@
+version: "3"
+
+silent: true
+
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "flux"
+
+vars:
+  CLUSTER_NAME: dapr-citizen-dev
+  CILIUM_VERSION: "1.19.3"
+  DAPR_VERSION: "1.17.5"
+
+tasks:
+  # =================================================================
+  # Dapr
+  # =================================================================
+  dapr:install:
+    desc: Install Dapr runtime with HA mode
+    cmds:
+      - echo "Installing Dapr {{.DAPR_VERSION}}..."
+      - helm repo add dapr https://dapr.github.io/helm-charts/ 2>/dev/null || true
+      - helm repo update dapr
+      - >-
+        helm upgrade --install dapr dapr/dapr
+        --version {{.DAPR_VERSION}}
+        --namespace dapr-system
+        --create-namespace
+        --set global.ha.enabled=true
+        --set global.logAsJson=true
+        --set global.mtls.enabled=true
+        --set global.prometheus.enabled=true
+        --wait --timeout 5m
+      - echo "Applying Dapr configuration..."
+      - kubectl apply -f kubernetes/dapr/dapr-config.yaml
+      - echo "Dapr installed."
+
+  dapr:status:
+    desc: Check Dapr component health
+    cmds:
+      - echo "==> Dapr system pods:"
+      - kubectl get pods -n dapr-system
+      - echo ""
+      - echo "==> Dapr configurations:"
+      - kubectl get configurations.dapr.io -A 2>/dev/null || echo "No Dapr configurations found"
+      - echo ""
+      - echo "==> Dapr components:"
+      - kubectl get components.dapr.io -A 2>/dev/null || echo "No Dapr components found"
+
+  # =================================================================
+  # Vault
+  # =================================================================
+  vault:install:
+    desc: Deploy Vault in dev mode and seed demo secrets
+    cmds:
+      - echo "Deploying Vault (dev mode)..."
+      - kubectl apply -f kubernetes/vault/vault-dev.yaml
+      - kubectl wait --for=condition=available deployment/vault -n vault-system --timeout=120s
+      - echo "Seeding demo secrets..."
+      - |
+        VAULT_POD=$(kubectl get pod -n vault-system -l app.kubernetes.io/name=vault -o jsonpath='{.items[0].metadata.name}')
+        kubectl cp kubernetes/vault/seed-secrets.sh vault-system/$VAULT_POD:/tmp/seed-secrets.sh
+        kubectl exec -n vault-system $VAULT_POD -- sh /tmp/seed-secrets.sh
+      - echo "Vault ready with demo secrets."
+
+  vault:status:
+    desc: Check Vault status and list secrets
+    cmds:
+      - echo "==> Vault pods:"
+      - kubectl get pods -n vault-system
+      - echo ""
+      - echo "==> Vault secrets:"
+      - |
+        VAULT_POD=$(kubectl get pod -n vault-system -l app.kubernetes.io/name=vault -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n vault-system $VAULT_POD -- env VAULT_TOKEN=demo-root-token vault kv list secret/dapr/ 2>/dev/null || echo "No secrets found"
+
+  # =================================================================
+  # ESO — connect to Vault and create ExternalSecrets per app
+  # =================================================================
+  eso:configure:
+    desc: Create ClusterSecretStore + ExternalSecrets for app1 and app2
+    cmds:
+      - echo "Configuring ESO → Vault connection..."
+      - kubectl apply -f kubernetes/eso/cluster-secret-store.yaml
+      - echo "Waiting for ClusterSecretStore to be ready..."
+      - |
+        for i in $(seq 1 30); do
+          STATUS=$(kubectl get clustersecretstore vault-backend -o jsonpath='{.status.conditions[0].status}' 2>/dev/null)
+          if [ "$STATUS" = "True" ]; then
+            echo "ClusterSecretStore ready."
+            break
+          fi
+          sleep 2
+        done
+      - echo "Creating ExternalSecrets for app1 and app2..."
+      - kubectl apply -f kubernetes/eso/app1-external-secret.yaml
+      - kubectl apply -f kubernetes/eso/app2-external-secret.yaml
+      - echo "Waiting for secrets to sync..."
+      - kubectl wait --for=condition=Ready externalsecret/app1-secrets -n app1-ns --timeout=60s
+      - kubectl wait --for=condition=Ready externalsecret/app2-secrets -n app2-ns --timeout=60s
+      - echo "ESO configured. Secrets synced from Vault."
+
+  eso:status:
+    desc: Check ESO sync status and synced secrets
+    cmds:
+      - echo "==> ClusterSecretStore:"
+      - kubectl get clustersecretstore vault-backend
+      - echo ""
+      - echo "==> ExternalSecrets:"
+      - kubectl get externalsecrets -A
+      - echo ""
+      - echo "==> Synced K8s Secrets:"
+      - kubectl get secret app1-secrets -n app1-ns -o jsonpath='{.data}' 2>/dev/null | jq -r 'keys[]' && echo "" || echo "app1-secrets not found"
+      - kubectl get secret app2-secrets -n app2-ns -o jsonpath='{.data}' 2>/dev/null | jq -r 'keys[]' && echo "" || echo "app2-secrets not found"
+
+  # =================================================================
+  # Flux — Dapr-specific sources and releases
+  # =================================================================
+  flux:apply:
+    desc: Apply Flux sources and releases for Dapr
+    cmds:
+      - kubectl apply -f kubernetes/flux/sources.yaml
+      - kubectl apply -f kubernetes/flux/dapr-release.yaml
+      - echo "Flux Kustomizations applied. Reconciling..."
+
+  # =================================================================
+  # Node status — verify nodepool simulation
+  # =================================================================
+  nodes:status:
+    desc: Show node labels and taints (verify nodepool simulation)
+    cmds:
+      - echo "==> Node labels and taints:"
+      - |
+        kubectl get nodes -o custom-columns=\
+        'NAME:.metadata.name,WORKLOAD:.metadata.labels.workload,APP:.metadata.labels.app,TAINTS:.spec.taints[*].key'
+      - echo ""
+      - echo "==> Node resource usage:"
+      - kubectl top nodes 2>/dev/null || echo "(metrics-server not ready yet)"
+
+  # =================================================================
+  # Full setup
+  # =================================================================
+  setup:
+    desc: Full setup — cluster, Cilium, monitoring, Flux, ESO, Dapr, Vault
+    cmds:
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - task: shared:metrics-server:install
+      - task: shared:monitoring:install
+      - task: shared:flux:install
+      - task: shared:eso:install
+      - task: vault:install
+      - task: eso:configure
+      - task: dapr:install
+      - |
+        echo ""
+        echo "==> Setup complete!"
+        echo ""
+        echo "Verify:"
+        echo "  task dapr:status             — Check Dapr health"
+        echo "  task vault:status            — Check Vault and secrets"
+        echo "  task eso:status              — Check ESO sync"
+        echo "  task nodes:status            — Verify nodepool simulation"
+        echo "  task shared:monitoring:status — Check Prometheus/Grafana"
+        echo ""
+        echo "Grafana:"
+        echo "  kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
+        echo "  Login — admin / admin"
+        echo ""
+        echo "Next steps (coming soon):"
+        echo "  task demo:app1         — Deploy app1"
+        echo "  task demo:app2         — Deploy app2"
+        echo "  task demo:isolation    — Prove cross-namespace isolation"
+
+  setup:flux:
+    desc: Full setup using Flux for GitOps-based Dapr install
+    cmds:
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - task: shared:metrics-server:install
+      - task: shared:monitoring:install
+      - task: shared:flux:install
+      - task: shared:eso:install
+      - task: vault:install
+      - task: eso:configure
+      - task: flux:apply
+      - echo ""
+      - echo "==> Flux-based setup initiated. Monitor reconciliation:"
+      - echo "    flux get helmreleases -A -w"
+
+  # =================================================================
+  # Cleanup
+  # =================================================================
+  clean:apps:
+    desc: Remove citizen-dev apps (keep cluster and infrastructure)
+    cmds:
+      - echo "Cleaning up citizen-dev apps..."
+      - kubectl delete namespace app1-ns --ignore-not-found
+      - kubectl delete namespace app2-ns --ignore-not-found
+      - echo "Apps cleaned up."
+
+  clean:
+    desc: Delete everything including the cluster
+    cmds:
+      - task: shared:cluster:delete

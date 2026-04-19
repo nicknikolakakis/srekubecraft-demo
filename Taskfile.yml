@@ -7,3 +7,6 @@ includes:
   oauth2-proxy-mcp:
     taskfile: oauth2-proxy-mcp/Taskfile.yml
     dir: oauth2-proxy-mcp
+  dapr:
+    taskfile: dapr/Taskfile.yml
+    dir: dapr

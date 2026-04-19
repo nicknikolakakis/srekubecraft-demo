@@ -1,0 +1,194 @@
+version: "3"
+
+silent: true
+
+# =============================================================================
+# Shared infrastructure tasks for all srekubecraft demos.
+#
+# Usage — include from a demo Taskfile with required vars:
+#
+#   includes:
+#     shared:
+#       taskfile: ../shared/Taskfile.yml
+#       vars:
+#         CLUSTER_NAME: my-demo
+#         CILIUM_VERSION: "1.19.3"
+#         EXTRA_TOOLS: "dapr flux"          # optional, appended to base check
+#
+# Required vars: CLUSTER_NAME, CILIUM_VERSION
+# =============================================================================
+
+vars:
+  EXTRA_TOOLS: ""
+  PROM_STACK_VERSION: "83.6.0"
+  ESO_VERSION: "2.3.0"
+
+tasks:
+  # ===========================================================================
+  # Pre-flight
+  # ===========================================================================
+  check:
+    desc: Check that all required tools are installed
+    cmds:
+      - |
+        echo "Checking required tools..."
+        TOOLS="kind kubectl helm cilium {{.EXTRA_TOOLS}}"
+        for cmd in $TOOLS; do
+          if ! command -v $cmd &> /dev/null; then
+            echo "ERROR: $cmd is not installed"
+            exit 1
+          fi
+        done
+        echo "All tools found."
+
+  # ===========================================================================
+  # Cluster lifecycle
+  # ===========================================================================
+  cluster:create:
+    desc: Create Kind cluster
+    deps: [check]
+    cmds:
+      - echo "Creating Kind cluster '{{.CLUSTER_NAME}}'..."
+      - kind create cluster --config kubernetes/cluster/kind-config.yaml --wait 60s
+      - echo "Cluster '{{.CLUSTER_NAME}}' created."
+    status:
+      - kind get clusters 2>/dev/null | grep -q "{{.CLUSTER_NAME}}"
+
+  cluster:delete:
+    desc: Delete the Kind cluster
+    cmds:
+      - echo "Deleting Kind cluster '{{.CLUSTER_NAME}}'..."
+      - kind delete cluster --name {{.CLUSTER_NAME}}
+      - rm -rf /tmp/{{.CLUSTER_NAME}}
+      - echo "Cluster deleted."
+
+  # ===========================================================================
+  # Cilium CNI
+  # ===========================================================================
+  cilium:install:
+    desc: Install Cilium as the CNI
+    deps: [cluster:create]
+    cmds:
+      - echo "Installing Cilium {{.CILIUM_VERSION}}..."
+      - helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+      - helm repo update cilium
+      - >-
+        helm upgrade --install cilium cilium/cilium
+        --version {{.CILIUM_VERSION}}
+        --namespace kube-system
+        --set image.pullPolicy=IfNotPresent
+        --set ipam.mode=kubernetes
+        --set kubeProxyReplacement=true
+        --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}"
+        --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}"
+        --set cgroup.autoMount.enabled=false
+        --set cgroup.hostRoot=/sys/fs/cgroup
+        --set k8sServiceHost={{.CLUSTER_NAME}}-control-plane
+        --set k8sServicePort=6443
+        --set hubble.relay.enabled=true
+        --set hubble.ui.enabled=true
+        --wait --timeout 5m
+      - cilium status --wait
+      - kubectl wait --for=condition=Ready nodes --all --timeout=120s
+      - echo "Cilium installed. All nodes ready."
+    status:
+      - helm list -n kube-system 2>/dev/null | grep -q cilium
+
+  # ===========================================================================
+  # Metrics Server
+  # ===========================================================================
+  metrics-server:install:
+    desc: Install Kubernetes Metrics Server
+    deps: [cilium:install]
+    cmds:
+      - echo "Installing Metrics Server..."
+      - helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ 2>/dev/null || true
+      - helm repo update metrics-server
+      - >-
+        helm upgrade --install metrics-server metrics-server/metrics-server
+        --namespace kube-system
+        --set 'args[0]=--kubelet-insecure-tls'
+        --wait
+      - echo "Metrics Server installed."
+
+  # ===========================================================================
+  # Prometheus + Grafana (kube-prometheus-stack)
+  # ===========================================================================
+  monitoring:install:
+    desc: Install kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
+    deps: [cilium:install]
+    cmds:
+      - echo "Installing kube-prometheus-stack {{.PROM_STACK_VERSION}}..."
+      - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+      - helm repo update prometheus-community
+      - >-
+        helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack
+        --version {{.PROM_STACK_VERSION}}
+        --namespace monitoring
+        --create-namespace
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+        --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false
+        --set grafana.adminPassword=admin
+        --set grafana.sidecar.dashboards.enabled=true
+        --set grafana.sidecar.dashboards.searchNamespace=ALL
+        --set alertmanager.enabled=false
+        --wait --timeout 5m
+      - |
+        echo "kube-prometheus-stack installed."
+        echo ""
+        echo "Access Grafana:"
+        echo "  kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
+        echo "  Login — admin / admin"
+
+  monitoring:status:
+    desc: Check Prometheus and Grafana status
+    cmds:
+      - echo "==> Monitoring pods:"
+      - kubectl get pods -n monitoring
+      - echo ""
+      - echo "==> ServiceMonitors:"
+      - kubectl get servicemonitors -A 2>/dev/null || echo "No ServiceMonitors found"
+
+  # ===========================================================================
+  # External Secrets Operator
+  # ===========================================================================
+  eso:install:
+    desc: Install External Secrets Operator
+    deps: [cilium:install]
+    cmds:
+      - echo "Installing External Secrets Operator {{.ESO_VERSION}}..."
+      - helm repo add external-secrets https://charts.external-secrets.io 2>/dev/null || true
+      - helm repo update external-secrets
+      - >-
+        helm upgrade --install external-secrets external-secrets/external-secrets
+        --version {{.ESO_VERSION}}
+        --namespace external-secrets
+        --create-namespace
+        --set installCRDs=true
+        --set webhook.port=9443
+        --wait --timeout 5m
+      - echo "External Secrets Operator installed."
+
+  eso:status:
+    desc: Check External Secrets Operator status
+    cmds:
+      - echo "==> ESO pods:"
+      - kubectl get pods -n external-secrets
+      - echo ""
+      - echo "==> ClusterSecretStores:"
+      - kubectl get clustersecretstores 2>/dev/null || echo "No ClusterSecretStores found"
+      - echo ""
+      - echo "==> ExternalSecrets:"
+      - kubectl get externalsecrets -A 2>/dev/null || echo "No ExternalSecrets found"
+
+  # ===========================================================================
+  # Flux CD
+  # ===========================================================================
+  flux:install:
+    desc: Bootstrap Flux on the cluster
+    deps: [cilium:install]
+    cmds:
+      - echo "Installing Flux..."
+      - flux install
+      - flux check
+      - echo "Flux installed."
