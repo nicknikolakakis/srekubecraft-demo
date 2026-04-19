@@ -1,5 +1,6 @@
 # =============================================================================
-# Flux HelmRelease for Dapr — HA mode with mTLS and JSON logging
+# Flux HelmRelease — Dapr runtime (HA mode)
+# Depends on: ESO (so Dapr components can reference K8s secrets)
 # =============================================================================
 ---
 apiVersion: v1
@@ -16,6 +17,9 @@ metadata:
   namespace: dapr-system
 spec:
   interval: 5m
+  dependsOn:
+    - name: external-secrets
+      namespace: external-secrets
   chart:
     spec:
       chart: dapr

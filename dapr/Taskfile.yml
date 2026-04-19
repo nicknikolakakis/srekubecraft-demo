@@ -13,46 +13,181 @@ includes:
 vars:
   CLUSTER_NAME: dapr-citizen-dev
   CILIUM_VERSION: "1.19.3"
-  DAPR_VERSION: "1.17.5"
+  HARBOR_REGISTRY: "localhost:30000"
+  HARBOR_PROJECT: "platform"
+  HARBOR_USER: "admin"
+  HARBOR_PASS: "Harbor12345"
 
 tasks:
   # =================================================================
-  # Dapr
+  # Bootstrap (imperative — runs once before Flux can operate)
   # =================================================================
-  dapr:install:
-    desc: Install Dapr runtime with HA mode
+  bootstrap:
+    desc: "Bootstrap: Kind cluster + Cilium CNI + Flux (imperative)"
     cmds:
-      - echo "Installing Dapr {{.DAPR_VERSION}}..."
-      - helm repo add dapr https://dapr.github.io/helm-charts/ 2>/dev/null || true
-      - helm repo update dapr
-      - >-
-        helm upgrade --install dapr dapr/dapr
-        --version {{.DAPR_VERSION}}
-        --namespace dapr-system
-        --create-namespace
-        --set global.ha.enabled=true
-        --set global.logAsJson=true
-        --set global.mtls.enabled=true
-        --set global.prometheus.enabled=true
-        --wait --timeout 5m
-      - echo "Applying Dapr configuration..."
-      - kubectl apply -f kubernetes/dapr/dapr-config.yaml
-      - echo "Dapr installed."
-
-  dapr:status:
-    desc: Check Dapr component health
-    cmds:
-      - echo "==> Dapr system pods:"
-      - kubectl get pods -n dapr-system
-      - echo ""
-      - echo "==> Dapr configurations:"
-      - kubectl get configurations.dapr.io -A 2>/dev/null || echo "No Dapr configurations found"
-      - echo ""
-      - echo "==> Dapr components:"
-      - kubectl get components.dapr.io -A 2>/dev/null || echo "No Dapr components found"
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - echo "Installing Flux..."
+      - flux install
+      - flux check
+      - echo "Bootstrap complete. Cluster has networking and GitOps."
 
   # =================================================================
-  # Vault
+  # Flux — apply all GitOps manifests
+  # =================================================================
+  flux:apply:
+    desc: Apply all Flux HelmRepositories and HelmReleases (infra only)
+    cmds:
+      - echo "Applying Flux sources..."
+      - kubectl apply -f kubernetes/flux/sources.yaml
+      - echo "Applying infrastructure HelmReleases..."
+      - kubectl apply -f kubernetes/flux/metrics-server-release.yaml
+      - kubectl apply -f kubernetes/flux/monitoring-release.yaml
+      - kubectl apply -f kubernetes/flux/eso-release.yaml
+      - kubectl apply -f kubernetes/flux/dapr-release.yaml
+      - kubectl apply -f kubernetes/flux/harbor-release.yaml
+      - echo "All infrastructure HelmReleases applied. Flux is reconciling..."
+
+  flux:apply:apps:
+    desc: Apply Flux HelmReleases for citizen-dev apps (pulls chart from Harbor)
+    cmds:
+      - echo "Applying app HelmReleases..."
+      - kubectl apply -f kubernetes/flux/app1-release.yaml
+      - kubectl apply -f kubernetes/flux/app2-release.yaml
+      - echo "App HelmReleases applied. Flux is pulling chart from Harbor..."
+      - echo "Waiting for apps to reconcile..."
+      - |
+        for hr in "app1/app1-ns" "app2/app2-ns"; do
+          NAME=$(echo $hr | cut -d/ -f1)
+          NS=$(echo $hr | cut -d/ -f2)
+          echo "  Waiting for $NAME in $NS..."
+          kubectl wait helmrelease/$NAME -n $NS --for=condition=Ready --timeout=180s 2>/dev/null || \
+            echo "  WARNING: $NAME not ready yet"
+        done
+      - |
+        echo ""
+        echo "==> Apps deployed via Flux + Harbor!"
+        echo ""
+        echo "Test:"
+        echo "  task test:app1      — Integration tests for app1"
+        echo "  task test:app2      — Integration tests for app2"
+        echo ""
+        echo "Dashboard:"
+        echo "  kubectl port-forward -n app2-ns svc/app2 8080:80"
+        echo "  Open http://localhost:8080"
+
+  flux:wait:
+    desc: Wait for all infrastructure Flux HelmReleases to be ready
+    cmds:
+      - echo "Waiting for HelmReleases to reconcile..."
+      - |
+        for hr in "metrics-server/kube-system" "kube-prometheus-stack/monitoring" "external-secrets/external-secrets" "dapr/dapr-system" "harbor/harbor-system"; do
+          NAME=$(echo $hr | cut -d/ -f1)
+          NS=$(echo $hr | cut -d/ -f2)
+          echo "  Waiting for $NAME in $NS..."
+          kubectl wait helmrelease/$NAME -n $NS --for=condition=Ready --timeout=600s 2>/dev/null || \
+            echo "  WARNING: $NAME not ready yet, continuing..."
+        done
+      - echo "All HelmReleases reconciled."
+
+  flux:status:
+    desc: Show Flux HelmRelease status
+    cmds:
+      - flux get helmreleases -A
+
+  # =================================================================
+  # Harbor — configure Kind nodes + push chart and images
+  # =================================================================
+  harbor:configure:
+    desc: Configure Kind nodes for Harbor and push chart + images
+    cmds:
+      - task: harbor:trust
+      - task: harbor:push:chart
+      - task: harbor:push:images
+
+  harbor:trust:
+    desc: Configure containerd on Kind nodes to pull from Harbor (insecure HTTP)
+    cmds:
+      - echo "Configuring containerd on Kind nodes to trust Harbor..."
+      - |
+        for node in $(kind get nodes --name {{.CLUSTER_NAME}}); do
+          echo "  Configuring $node..."
+          docker exec "$node" sh -c '
+            if ! grep -q "config_path" /etc/containerd/config.toml; then
+              cat >> /etc/containerd/config.toml <<TOML
+
+        [plugins."io.containerd.grpc.v1.cri".registry]
+          config_path = "/etc/containerd/certs.d"
+        TOML
+            fi
+          '
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/{{.HARBOR_REGISTRY}}
+          docker exec "$node" sh -c 'cat > /etc/containerd/certs.d/{{.HARBOR_REGISTRY}}/hosts.toml <<TOML
+        server = "http://{{.HARBOR_REGISTRY}}"
+
+        [host."http://{{.HARBOR_REGISTRY}}"]
+          capabilities = ["pull", "resolve", "push"]
+          skip_verify = true
+        TOML'
+          docker exec "$node" systemctl restart containerd
+        done
+      - echo "Waiting for nodes to be Ready..."
+      - kubectl wait --for=condition=Ready nodes --all --timeout=120s
+      - echo "All nodes trust Harbor at {{.HARBOR_REGISTRY}}."
+
+  harbor:push:chart:
+    desc: Package and push the shared app Helm chart to Harbor
+    cmds:
+      - echo "Logging into Harbor..."
+      - echo "{{.HARBOR_PASS}}" | helm registry login {{.HARBOR_REGISTRY}} -u {{.HARBOR_USER}} --password-stdin --plain-http
+      - echo "Packaging chart..."
+      - helm package charts/app -d /tmp/dapr-charts/
+      - echo "Pushing chart to Harbor..."
+      - helm push /tmp/dapr-charts/app-0.1.0.tgz oci://{{.HARBOR_REGISTRY}}/{{.HARBOR_PROJECT}} --plain-http
+      - rm -rf /tmp/dapr-charts/
+      - echo "Chart pushed to Harbor."
+
+  harbor:push:images:
+    desc: Build and push app container images to Harbor
+    cmds:
+      - echo "Logging Docker into Harbor..."
+      - echo "{{.HARBOR_PASS}}" | docker login {{.HARBOR_REGISTRY}} -u {{.HARBOR_USER}} --password-stdin
+      - echo "Building and pushing app1..."
+      - docker build -t {{.HARBOR_REGISTRY}}/{{.HARBOR_PROJECT}}/dapr-app1:latest app/app1/
+      - docker push {{.HARBOR_REGISTRY}}/{{.HARBOR_PROJECT}}/dapr-app1:latest
+      - echo "Building and pushing app2..."
+      - docker build -t {{.HARBOR_REGISTRY}}/{{.HARBOR_PROJECT}}/dapr-app2:latest app/app2/
+      - docker push {{.HARBOR_REGISTRY}}/{{.HARBOR_PROJECT}}/dapr-app2:latest
+      - echo "All images pushed to Harbor."
+
+  harbor:create:project:
+    desc: Create the platform project in Harbor
+    cmds:
+      - echo "Creating Harbor project '{{.HARBOR_PROJECT}}'..."
+      - |
+        curl -sf -X POST http://{{.HARBOR_REGISTRY}}/api/v2.0/projects \
+          -u {{.HARBOR_USER}}:{{.HARBOR_PASS}} \
+          -H "Content-Type: application/json" \
+          -d '{"project_name":"{{.HARBOR_PROJECT}}","public":true}' || \
+        echo "  (project may already exist)"
+      - echo "Harbor project ready."
+
+  harbor:status:
+    desc: Check Harbor health and list artifacts
+    cmds:
+      - echo "==> Harbor health:"
+      - curl -s http://{{.HARBOR_REGISTRY}}/api/v2.0/health | jq -r '.status'
+      - echo ""
+      - echo "==> Harbor pods:"
+      - kubectl get pods -n harbor-system
+      - echo ""
+      - echo "==> Artifacts in '{{.HARBOR_PROJECT}}' project:"
+      - |
+        curl -s http://{{.HARBOR_REGISTRY}}/api/v2.0/projects/{{.HARBOR_PROJECT}}/repositories \
+          -u {{.HARBOR_USER}}:{{.HARBOR_PASS}} | jq -r '.[].name'
+
+  # =================================================================
+  # Vault (post-Flux — needs ESO HelmRelease to be ready first)
   # =================================================================
   vault:install:
     desc: Deploy Vault in dev mode and seed demo secrets
@@ -79,6 +214,28 @@ tasks:
         kubectl exec -n vault-system $VAULT_POD -- env VAULT_TOKEN=demo-root-token vault kv list secret/dapr/ 2>/dev/null || echo "No secrets found"
 
   # =================================================================
+  # Dapr config (post-Flux — needs Dapr HelmRelease CRDs)
+  # =================================================================
+  dapr:configure:
+    desc: Apply Dapr Configuration CR
+    cmds:
+      - echo "Applying Dapr configuration..."
+      - kubectl apply -f kubernetes/dapr/dapr-config.yaml
+      - echo "Dapr configuration applied."
+
+  dapr:status:
+    desc: Check Dapr component health
+    cmds:
+      - echo "==> Dapr system pods:"
+      - kubectl get pods -n dapr-system
+      - echo ""
+      - echo "==> Dapr configurations:"
+      - kubectl get configurations.dapr.io -A 2>/dev/null || echo "No Dapr configurations found"
+      - echo ""
+      - echo "==> Dapr components:"
+      - kubectl get components.dapr.io -A 2>/dev/null || echo "No Dapr components found"
+
+  # =================================================================
   # ESO — connect to Vault and create ExternalSecrets per app
   # =================================================================
   eso:configure:
@@ -103,6 +260,15 @@ tasks:
       - kubectl wait --for=condition=Ready externalsecret/app1-secrets -n app1-ns --timeout=60s
       - kubectl wait --for=condition=Ready externalsecret/app2-secrets -n app2-ns --timeout=60s
       - echo "ESO configured. Secrets synced from Vault."
+      - echo "Creating Vault access tokens for Dapr secret store..."
+      - |
+        for NS in app1-ns app2-ns; do
+          kubectl create secret generic vault-access \
+            --from-literal=token=demo-root-token \
+            --namespace $NS \
+            --dry-run=client -o yaml | kubectl apply -f -
+        done
+      - echo "Vault access tokens created."
 
   eso:status:
     desc: Check ESO sync status and synced secrets
@@ -118,17 +284,54 @@ tasks:
       - kubectl get secret app2-secrets -n app2-ns -o jsonpath='{.data}' 2>/dev/null | jq -r 'keys[]' && echo "" || echo "app2-secrets not found"
 
   # =================================================================
-  # Flux — Dapr-specific sources and releases
+  # Redis — shared state store backend
   # =================================================================
-  flux:apply:
-    desc: Apply Flux sources and releases for Dapr
+  redis:install:
+    desc: Deploy Redis for Dapr state store
     cmds:
-      - kubectl apply -f kubernetes/flux/sources.yaml
-      - kubectl apply -f kubernetes/flux/dapr-release.yaml
-      - echo "Flux Kustomizations applied. Reconciling..."
+      - echo "Deploying Redis..."
+      - kubectl apply -f kubernetes/redis/redis.yaml
+      - kubectl wait --for=condition=available deployment/redis -n redis-system --timeout=60s
+      - echo "Redis ready."
 
   # =================================================================
-  # Node status — verify nodepool simulation
+  # Integration tests
+  # =================================================================
+  test:app1:
+    desc: Run integration tests against app1
+    cmds:
+      - echo "==> Health check:"
+      - kubectl run curl-health -n app1-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s http://app1.app1-ns.svc.cluster.local/health
+      - echo ""
+      - echo "==> Classify a bug report:"
+      - kubectl run curl-classify -n app1-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s -X POST http://app1.app1-ns.svc.cluster.local/classify -d '{"message":"the login page is broken"}'
+      - echo ""
+      - echo "==> Classify a feature request:"
+      - kubectl run curl-feature -n app1-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s -X POST http://app1.app1-ns.svc.cluster.local/classify -d '{"message":"I want to add dark mode"}'
+      - echo ""
+      - echo "==> Get classification history:"
+      - kubectl run curl-history -n app1-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s http://app1.app1-ns.svc.cluster.local/history
+      - echo ""
+      - echo "==> Verify pod is on the correct node:"
+      - kubectl get pod -n app1-ns -l app.kubernetes.io/name=app1 -o wide
+
+  test:app2:
+    desc: Run integration tests against app2
+    cmds:
+      - echo "==> Health check:"
+      - kubectl run curl-health -n app2-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s http://app2.app2-ns.svc.cluster.local/health
+      - echo ""
+      - echo "==> Classify via app2 → app1 (Dapr service invocation):"
+      - kubectl run curl-classify -n app2-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s -X POST http://app2.app2-ns.svc.cluster.local/api/classify -H 'Content-Type:application/json' -d '{"message":"the database keeps crashing"}'
+      - echo ""
+      - echo "==> Get history via app2 → app1 (Dapr service invocation):"
+      - kubectl run curl-history -n app2-ns --rm -i --restart=Never --image=curlimages/curl -- curl -s http://app2.app2-ns.svc.cluster.local/api/history
+      - echo ""
+      - echo "==> Verify pod is on the correct node:"
+      - kubectl get pod -n app2-ns -l app.kubernetes.io/name=app2 -o wide
+
+  # =================================================================
+  # Node status
   # =================================================================
   nodes:status:
     desc: Show node labels and taints (verify nodepool simulation)
@@ -145,52 +348,46 @@ tasks:
   # Full setup
   # =================================================================
   setup:
-    desc: Full setup — cluster, Cilium, monitoring, Flux, ESO, Dapr, Vault
+    desc: "Full setup: bootstrap → Flux infra → Vault → ESO → Dapr → Redis → Harbor → apps"
     cmds:
-      - task: shared:cluster:create
-      - task: shared:cilium:install
-      - task: shared:metrics-server:install
-      - task: shared:monitoring:install
-      - task: shared:flux:install
-      - task: shared:eso:install
+      - task: bootstrap
+      - task: flux:apply
+      - task: flux:wait
       - task: vault:install
       - task: eso:configure
-      - task: dapr:install
+      - task: dapr:configure
+      - task: redis:install
+      - task: harbor:configure
+      - task: flux:apply:apps
       - |
         echo ""
-        echo "==> Setup complete!"
+        echo "=========================================="
+        echo "  Setup complete! Everything Flux-managed."
+        echo "=========================================="
+        echo ""
+        echo "Flux HelmReleases (7 total):"
+        echo "  Infrastructure: metrics-server, kube-prometheus-stack, external-secrets, dapr, harbor"
+        echo "  Apps:           app1 (chart from Harbor), app2 (chart from Harbor)"
         echo ""
         echo "Verify:"
-        echo "  task dapr:status             — Check Dapr health"
-        echo "  task vault:status            — Check Vault and secrets"
-        echo "  task eso:status              — Check ESO sync"
-        echo "  task nodes:status            — Verify nodepool simulation"
-        echo "  task shared:monitoring:status — Check Prometheus/Grafana"
+        echo "  task flux:status    — All HelmRelease status"
+        echo "  task harbor:status  — Harbor health + artifacts"
+        echo "  task dapr:status    — Dapr pods and config"
+        echo "  task vault:status   — Vault secrets"
+        echo "  task eso:status     — ESO sync status"
+        echo "  task nodes:status   — Node labels and taints"
+        echo ""
+        echo "Test:"
+        echo "  task test:app1      — Integration tests for app1"
+        echo "  task test:app2      — Integration tests for app2"
+        echo ""
+        echo "Dashboard:"
+        echo "  kubectl port-forward -n app2-ns svc/app2 8080:80"
+        echo "  Open http://localhost:8080"
         echo ""
         echo "Grafana:"
         echo "  kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
         echo "  Login — admin / admin"
-        echo ""
-        echo "Next steps (coming soon):"
-        echo "  task demo:app1         — Deploy app1"
-        echo "  task demo:app2         — Deploy app2"
-        echo "  task demo:isolation    — Prove cross-namespace isolation"
-
-  setup:flux:
-    desc: Full setup using Flux for GitOps-based Dapr install
-    cmds:
-      - task: shared:cluster:create
-      - task: shared:cilium:install
-      - task: shared:metrics-server:install
-      - task: shared:monitoring:install
-      - task: shared:flux:install
-      - task: shared:eso:install
-      - task: vault:install
-      - task: eso:configure
-      - task: flux:apply
-      - echo ""
-      - echo "==> Flux-based setup initiated. Monitor reconciliation:"
-      - echo "    flux get helmreleases -A -w"
 
   # =================================================================
   # Cleanup
@@ -199,6 +396,8 @@ tasks:
     desc: Remove citizen-dev apps (keep cluster and infrastructure)
     cmds:
       - echo "Cleaning up citizen-dev apps..."
+      - kubectl delete helmrelease app1 -n app1-ns --ignore-not-found
+      - kubectl delete helmrelease app2 -n app2-ns --ignore-not-found
       - kubectl delete namespace app1-ns --ignore-not-found
       - kubectl delete namespace app2-ns --ignore-not-found
       - echo "Apps cleaned up."

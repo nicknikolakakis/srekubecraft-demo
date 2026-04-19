@@ -1,0 +1,77 @@
+# =============================================================================
+# Flux HelmRelease — Harbor Registry
+# Provides OCI registry for Helm charts and container images.
+# Platform team deploys this; citizen developers push their apps here.
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor-system
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: harbor
+  namespace: harbor-system
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: harbor
+      version: ">=1.18.3"
+      sourceRef:
+        kind: HelmRepository
+        name: harbor
+        namespace: flux-system
+  values:
+    # --- Expose via NodePort on 30000 (mapped to host in Kind config) ---
+    expose:
+      type: nodePort
+      tls:
+        enabled: false
+      nodePort:
+        ports:
+          http:
+            nodePort: 30000
+    # externalURL must match how clients reach Harbor from outside the cluster
+    externalURL: http://localhost:30000
+
+    # --- Disable components not needed for this demo ---
+    trivy:
+      enabled: false
+    notary:
+      enabled: false
+
+    # --- Small PVCs for Kind (local-path-provisioner) ---
+    persistence:
+      enabled: true
+      persistentVolumeClaim:
+        registry:
+          size: 2Gi
+        database:
+          size: 1Gi
+        redis:
+          size: 1Gi
+        jobservice:
+          jobLog:
+            size: 1Gi
+
+    # --- Reduce resource footprint for Kind ---
+    nginx:
+      replicas: 1
+    portal:
+      replicas: 1
+    core:
+      replicas: 1
+    jobservice:
+      replicas: 1
+    registry:
+      replicas: 1
+
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3

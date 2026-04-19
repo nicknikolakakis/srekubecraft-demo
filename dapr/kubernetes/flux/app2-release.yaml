@@ -1,0 +1,52 @@
+# =============================================================================
+# Flux HelmRelease — App2 (Classification Dashboard)
+# Calls app1 via Dapr service invocation — no SDK, no service URLs needed.
+# =============================================================================
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: app2
+  namespace: app2-ns
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: app
+      version: ">=0.1.0"
+      sourceRef:
+        kind: HelmRepository
+        name: harbor-platform
+        namespace: flux-system
+  values:
+    image:
+      repository: localhost:30000/platform/dapr-app2
+      tag: latest
+      pullPolicy: IfNotPresent
+
+    port: 8080
+
+    nodepool: app2
+
+    # Allow calling app1 via Dapr service invocation
+    networkPolicy:
+      enabled: true
+      allowEgressTo:
+        - app1-ns
+
+    # Dapr secret store — read secrets from Vault (via Dapr API)
+    secretstore:
+      enabled: true
+      vault:
+        address: "http://vault.vault-system.svc.cluster.local:8200"
+        secretsPath: "dapr/app2"
+        tokenSecret:
+          name: "vault-access"
+          key: "token"
+
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3

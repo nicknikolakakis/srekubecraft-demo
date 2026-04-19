@@ -1,6 +1,33 @@
 # =============================================================================
-# Flux HelmRepository sources for Dapr demo
+# Flux HelmRepository sources
 # =============================================================================
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: prometheus-community
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://prometheus-community.github.io/helm-charts
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: metrics-server
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://kubernetes-sigs.github.io/metrics-server
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: external-secrets
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://charts.external-secrets.io
 ---
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
@@ -14,17 +41,20 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
-  name: cilium
+  name: harbor
   namespace: flux-system
 spec:
   interval: 1h
-  url: https://helm.cilium.io
+  url: https://helm.goharbor.io
 ---
+# OCI source — pulls the shared app chart from Harbor inside the cluster
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
-  name: metrics-server
+  name: harbor-platform
   namespace: flux-system
 spec:
-  interval: 1h
-  url: https://kubernetes-sigs.github.io/metrics-server
+  type: oci
+  interval: 5m
+  url: oci://harbor.harbor-system.svc.cluster.local/platform
+  insecure: true
