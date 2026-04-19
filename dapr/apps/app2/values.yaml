@@ -1,0 +1,28 @@
+# =============================================================================
+# App2 — Classification dashboard (Node.js/TypeScript)
+# Calls app1 via Dapr service invocation — no SDK, no service URLs needed.
+# =============================================================================
+
+image:
+  repository: dapr-app2
+  tag: latest
+
+port: 8080
+
+nodepool: app2
+
+# Allow calling app1 via Dapr service invocation
+networkPolicy:
+  enabled: true
+  allowEgressTo:
+    - app1-ns
+
+# Dapr secret store — read secrets from Vault (via Dapr API)
+secretstore:
+  enabled: true
+  vault:
+    address: "http://vault.vault-system.svc.cluster.local:8200"
+    secretsPath: "dapr/app2"
+    tokenSecret:
+      name: "vault-access"
+      key: "token"

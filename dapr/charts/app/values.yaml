@@ -1,0 +1,88 @@
+# =============================================================================
+# Default values for the shared app chart.
+# Citizen developers override these in apps/<name>/values.yaml
+# =============================================================================
+
+image:
+  repository: ""
+  tag: "latest"
+  pullPolicy: Never        # Kind clusters use pre-loaded images
+
+port: 8080
+
+# Dedicated nodepool scheduling
+nodepool: ""                # e.g., "app1" — matches node taint/label
+
+# Resource requests and limits for the app container
+# (platform team sets safe defaults, citizen developer can override)
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# --- Dapr sidecar configuration ---
+dapr:
+  enabled: true
+  appProtocol: http
+  config: dapr-config
+  logLevel: info
+  sidecar:
+    cpuRequest: 100m
+    memoryRequest: 64Mi
+    cpuLimit: 300m
+    memoryLimit: 128Mi
+
+# --- Dapr Components (platform team configures, citizen developer consumes) ---
+
+# State store (backed by Redis)
+statestore:
+  enabled: false
+  redis:
+    host: "redis.redis-system.svc.cluster.local:6379"
+
+# Secret store (backed by Vault — citizen developer reads via Dapr API)
+secretstore:
+  enabled: false
+  vault:
+    address: "http://vault.vault-system.svc.cluster.local:8200"
+    # Path prefix in Vault KV v2 where this app's secrets live
+    secretsPath: ""         # e.g., "dapr/app1"
+    # K8s secret containing the Vault token (created by ESO)
+    tokenSecret:
+      name: ""              # e.g., "app1-secrets" — ESO-synced secret
+      key: ""               # key within the secret that holds the Vault token
+
+# HTTP output binding (e.g., Slack webhook, external API)
+binding:
+  enabled: false
+  name: ""                  # e.g., "slack"
+  url: ""                   # target URL
+
+# Pub/Sub (backed by Redis)
+pubsub:
+  enabled: false
+  redis:
+    host: "redis.redis-system.svc.cluster.local:6379"
+
+# --- Namespace resource quota ---
+quota:
+  requests:
+    cpu: "2"
+    memory: 1Gi
+  limits:
+    cpu: "4"
+    memory: 2Gi
+  maxPods: 10
+
+# --- Network policy ---
+networkPolicy:
+  enabled: true
+  # Allow Dapr service invocation from other app namespaces
+  allowIngressFrom: []      # e.g., ["app2-ns"] — namespaces that can call this app via Dapr
+  # Allow Dapr service invocation to other app namespaces
+  allowEgressTo: []          # e.g., ["app1-ns"] — namespaces this app can call via Dapr
+  # Additional egress rules (e.g., external APIs)
+  additionalEgress: []

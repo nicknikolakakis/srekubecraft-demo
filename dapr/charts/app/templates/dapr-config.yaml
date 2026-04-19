@@ -1,0 +1,16 @@
+{{- if .Values.dapr.enabled }}
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: {{ .Values.dapr.config }}
+  namespace: {{ include "app.namespace" . }}
+spec:
+  mtls:
+    enabled: true
+    workloadCertTTL: "24h"
+    allowedClockSkew: "15m"
+    controlPlaneTrustDomain: "cluster.local"
+    sentryAddress: "dapr-sentry.dapr-system.svc.cluster.local:443"
+  metrics:
+    enabled: true
+{{- end }}

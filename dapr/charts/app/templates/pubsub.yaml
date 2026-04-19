@@ -1,0 +1,17 @@
+{{- if .Values.pubsub.enabled }}
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: {{ include "app.name" . }}-pubsub
+  namespace: {{ include "app.namespace" . }}
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: {{ .Values.pubsub.redis.host | quote }}
+    - name: redisPassword
+      value: ""
+scopes:
+  - {{ include "app.name" . }}
+{{- end }}

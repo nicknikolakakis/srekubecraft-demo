@@ -1,0 +1,100 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+# Default deny all ingress and egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ include "app.namespace" . }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow ingress from same namespace + authorized cross-namespace Dapr callers
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress
+  namespace: {{ include "app.namespace" . }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Same namespace (Dapr sidecar <-> app)
+    - from:
+        - podSelector: {}
+    {{- range .Values.networkPolicy.allowIngressFrom }}
+    # Cross-namespace Dapr service invocation from {{ . }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+      ports:
+        - protocol: TCP
+          port: 50002
+    {{- end }}
+---
+# Allow required egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: {{ include "app.namespace" . }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Dapr control plane
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: dapr-system
+    # Within same namespace (app <-> Dapr sidecar)
+    - to:
+        - podSelector: {}
+    {{- if or .Values.statestore.enabled .Values.pubsub.enabled }}
+    # Redis (state store / pub/sub)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: redis-system
+      ports:
+        - protocol: TCP
+          port: 6379
+    {{- end }}
+    {{- if .Values.secretstore.enabled }}
+    # Vault (Dapr secret store)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vault-system
+      ports:
+        - protocol: TCP
+          port: 8200
+    {{- end }}
+    {{- range .Values.networkPolicy.allowEgressTo }}
+    # Cross-namespace Dapr service invocation to {{ . }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+      ports:
+        - protocol: TCP
+          port: 50002
+    {{- end }}
+    {{- range .Values.networkPolicy.additionalEgress }}
+    - {{ toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

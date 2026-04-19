@@ -1,0 +1,35 @@
+# =============================================================================
+# App1 — Message classifier bot
+# This is all a citizen developer needs to provide.
+# Everything else (Dapr, network policies, quotas) comes from the shared chart.
+# =============================================================================
+
+image:
+  repository: dapr-app1
+  tag: latest
+
+port: 8080
+
+nodepool: app1
+
+# Allow app2 to call this app via Dapr service invocation
+networkPolicy:
+  enabled: true
+  allowIngressFrom:
+    - app2-ns
+
+# Dapr state store — save classifications to Redis (via Dapr API)
+statestore:
+  enabled: true
+  redis:
+    host: "redis.redis-system.svc.cluster.local:6379"
+
+# Dapr secret store — read secrets from Vault (via Dapr API)
+secretstore:
+  enabled: true
+  vault:
+    address: "http://vault.vault-system.svc.cluster.local:8200"
+    secretsPath: "dapr/app1"
+    tokenSecret:
+      name: "vault-access"
+      key: "token"

@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "app.name" . }}
+  namespace: {{ include "app.namespace" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "app.selectorLabels" . | nindent 8 }}
+      {{- if .Values.dapr.enabled }}
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: {{ include "app.name" . | quote }}
+        dapr.io/app-port: {{ .Values.port | quote }}
+        dapr.io/app-protocol: {{ .Values.dapr.appProtocol | quote }}
+        dapr.io/config: {{ .Values.dapr.config | quote }}
+        dapr.io/log-level: {{ .Values.dapr.logLevel | quote }}
+        dapr.io/sidecar-cpu-request: {{ .Values.dapr.sidecar.cpuRequest | quote }}
+        dapr.io/sidecar-memory-request: {{ .Values.dapr.sidecar.memoryRequest | quote }}
+        dapr.io/sidecar-cpu-limit: {{ .Values.dapr.sidecar.cpuLimit | quote }}
+        dapr.io/sidecar-memory-limit: {{ .Values.dapr.sidecar.memoryLimit | quote }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "app.name" . }}
+      {{- if .Values.nodepool }}
+      tolerations:
+        - key: "app"
+          operator: "Equal"
+          value: {{ .Values.nodepool | quote }}
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "app"
+                    operator: In
+                    values:
+                      - {{ .Values.nodepool | quote }}
+      {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: {{ include "app.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.port }}
+              name: http
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false

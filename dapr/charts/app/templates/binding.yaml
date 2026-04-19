@@ -1,0 +1,15 @@
+{{- if .Values.binding.enabled }}
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: {{ .Values.binding.name }}
+  namespace: {{ include "app.namespace" . }}
+spec:
+  type: bindings.http
+  version: v1
+  metadata:
+    - name: url
+      value: {{ .Values.binding.url | quote }}
+scopes:
+  - {{ include "app.name" . }}
+{{- end }}
