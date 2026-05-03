@@ -25,6 +25,7 @@ Companion code for [srekubecraft.io](https://srekubecraft.io/) blog posts. Each 
 | `knative/` | [Knative - The Platform Engineer's Guide to Serverless on Kubernetes](https://srekubecraft.io/posts/knative/) | Knative Serving & Eventing |
 | `oauth2-proxy-mcp/` | [OAuth2-Proxy - Securing MCP Servers on Kubernetes](https://srekubecraft.io/posts/oauth2-proxy/) | OAuth2-Proxy sidecar + DBHub MCP + NetworkPolicies |
 | `dapr/` | [Dapr - Building a Safe Platform for Citizen Developer Apps on Kubernetes](https://srekubecraft.io/posts/dapr/) | Dapr runtime + shared Helm chart + Harbor OCI + Flux GitOps + Vault/ESO secrets + node isolation |
+| `kserve/` | [KServe - Production ML Serving on Kubernetes, from sklearn to LLMs](https://srekubecraft.io/posts/kserve/) | KServe Serverless mode + Knative + Istio + cert-manager + sklearn-iris (scale-to-zero) + Ollama LLM custom predictor (OpenAI-compatible chat API) |
 
 ## Prerequisites
 

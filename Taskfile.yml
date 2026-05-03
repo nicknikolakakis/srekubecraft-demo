@@ -10,3 +10,6 @@ includes:
   dapr:
     taskfile: dapr/Taskfile.yml
     dir: dapr
+  kserve:
+    taskfile: kserve/Taskfile.yml
+    dir: kserve
