@@ -82,7 +82,7 @@ tasks:
       - flux reconcile helmrelease kserve-runtime-configs -n kserve --with-source 2>&1 || true
       - kubectl wait helmrelease/kserve-runtime-configs -n kserve --for=condition=Ready --timeout=180s
       - echo "Verifying ClusterServingRuntimes are installed..."
-      - kubectl get clusterservingruntime kserve-huggingfaceserver
+      - kubectl get clusterservingruntimes
 
   flux:status:
     desc: Show Flux HelmRelease status
