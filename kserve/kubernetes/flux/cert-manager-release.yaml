@@ -1,0 +1,48 @@
+# =============================================================================
+# Flux HelmRelease - cert-manager
+# Required by KServe webhook + Knative serving for TLS cert issuance
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/managed-by: flux
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: cert-manager
+      version: "v1.20.2"
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: flux-system
+  values:
+    crds:
+      enabled: true
+    # Pin to system worker (matches dapr/knative demos)
+    nodeSelector:
+      workload: system
+    webhook:
+      nodeSelector:
+        workload: system
+    cainjector:
+      nodeSelector:
+        workload: system
+    startupapicheck:
+      nodeSelector:
+        workload: system
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3

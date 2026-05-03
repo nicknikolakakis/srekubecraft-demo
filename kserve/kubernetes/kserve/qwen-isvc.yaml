@@ -1,0 +1,48 @@
+# =============================================================================
+# InferenceService — Qwen2.5-0.5B-Instruct served via the HuggingFace runtime
+#
+# Why these choices:
+#   - modelFormat: huggingface         → KServe picks the kserve-huggingfaceserver
+#                                        ClusterServingRuntime automatically
+#   - storageUri: hf://...             → KServe pulls the model from HuggingFace Hub
+#   - --backend=huggingface            → forces the plain HF transformers backend
+#                                        instead of vLLM, which is required for CPU
+#   - --dtype=float32                  → float32 for CPU (vLLM default float16 is GPU-only)
+#   - resources                        → tuned for Qwen 0.5B on CPU
+#   - autoscaling.knative.dev/min-scale: "0"
+#                                      → enables scale-to-zero (Knative serverless)
+#
+# After 30s of no requests the pod terminates. The next request triggers a
+# cold start (~30-60s with model loading) and the pod scales back up.
+# =============================================================================
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen
+  namespace: llm
+  annotations:
+    autoscaling.knative.dev/window: "60s"
+spec:
+  predictor:
+    minReplicas: 0
+    maxReplicas: 1
+    nodeSelector:
+      workload: inference
+    timeout: 600
+    model:
+      modelFormat:
+        name: huggingface
+      storageUri: "hf://Qwen/Qwen2.5-0.5B-Instruct"
+      args:
+        - --model_name=qwen
+        - --backend=huggingface
+        - --dtype=float32
+        - --max_length=512
+      resources:
+        requests:
+          cpu: "1"
+          memory: 4Gi
+        limits:
+          cpu: "2"
+          memory: 6Gi

@@ -1,0 +1,42 @@
+# =============================================================================
+# InferenceService - sklearn iris classifier
+#
+# This is the live, runnable demo on Apple Silicon / arm64 hosts. The
+# kserve/sklearnserver runtime image is multi-arch (amd64 + arm64), unlike
+# the LLM huggingfaceserver image which is amd64-only at v0.18.0.
+#
+# What it does:
+#   - Loads a pre-trained scikit-learn iris classifier from GCS
+#   - Exposes /v1/models/sklearn-iris:predict (KServe v1 protocol)
+#   - Scales to zero after 30s of no traffic, cold-starts on next request
+#
+# Input shape: 4 floats (sepal length, sepal width, petal length, petal width)
+# Output:      one of 3 species labels (0, 1, 2)
+# =============================================================================
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sklearn-iris
+  namespace: llm
+  annotations:
+    autoscaling.knative.dev/window: "60s"
+spec:
+  predictor:
+    # Use the predictor-level fields - KServe overrides Knative annotations
+    # with its own defaults if minReplicas is not set in the spec.
+    minReplicas: 0
+    maxReplicas: 1
+    nodeSelector:
+      workload: inference
+    model:
+      modelFormat:
+        name: sklearn
+      storageUri: "gs://kfserving-examples/models/sklearn/1.0/model"
+      resources:
+        requests:
+          cpu: "100m"
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi

@@ -1,0 +1,74 @@
+# =============================================================================
+# InferenceService - Ollama with qwen2.5:0.5b (custom predictor pattern)
+#
+# Why custom predictor?
+#   KServe v0.18 publishes the kserve/huggingfaceserver image as amd64-only.
+#   On arm64 (Apple Silicon) the built-in HuggingFace runtime hits
+#   ImagePullBackOff. The "custom predictor" pattern lets us bring our own
+#   container - here, ollama/ollama which is multi-arch (amd64 + arm64) and
+#   serves an OpenAI-compatible chat API on /v1/chat/completions.
+#
+# Model: Qwen 2.5 0.5B Instruct (~400 MB), small enough for CPU.
+#
+# Why min-scale: 1?
+#   Scale-to-zero would terminate the pod and drop the cached model.
+#   Cold start = re-pull the 400 MB model (~3-5 min on a typical laptop
+#   connection). For LLM serving this is unacceptable, so the pod stays
+#   warm. The sklearn demo in sklearn-isvc.yaml shows scale-to-zero properly.
+# =============================================================================
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: ollama
+  namespace: llm
+  annotations:
+    # Allow up to 10 minutes for the model to download on first start
+    serving.knative.dev/progress-deadline: "10m"
+spec:
+  predictor:
+    # Always-on for LLMs - cold start would re-pull the 400 MB model
+    minReplicas: 1
+    maxReplicas: 1
+    nodeSelector:
+      workload: inference
+    timeout: 600
+    containers:
+      - name: kserve-container
+        image: ollama/ollama:latest
+        env:
+          # Ollama listens on port 8080 to match Knative's expected user port
+          - name: OLLAMA_HOST
+            value: "0.0.0.0:8080"
+        command:
+          - /bin/sh
+          - -c
+        args:
+          - |
+            set -e
+            echo "Starting ollama serve on :8080..."
+            ollama serve &
+            SERVE_PID=$!
+            echo "Waiting for the Ollama daemon..."
+            until ollama list >/dev/null 2>&1; do sleep 1; done
+            echo "Pulling qwen2.5:0.5b model (~400 MB)..."
+            ollama pull qwen2.5:0.5b
+            echo "Model ready. Serving requests."
+            wait "$SERVE_PID"
+        ports:
+          - containerPort: 8080
+            protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 60
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

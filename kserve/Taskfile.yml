@@ -1,0 +1,346 @@
+version: "3"
+
+silent: true
+
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "flux jq"
+
+vars:
+  CLUSTER_NAME: kserve-llm
+  CILIUM_VERSION: "1.19.3"
+  KNATIVE_OPERATOR_VERSION: "v1.22.0"
+  ISVC_NAMESPACE: "llm"
+  # The live demo runs sklearn-iris (multi-arch image, works on arm64).
+  # The Qwen LLM manifest is included as reference for amd64/GPU hosts -
+  # see kubernetes/kserve/qwen-isvc.yaml. KServe v0.18 publishes the
+  # huggingfaceserver image as amd64-only, so the LLM cannot be served on
+  # Apple Silicon without amd64 emulation.
+  ISVC_NAME: "sklearn-iris"
+
+tasks:
+  # ===========================================================================
+  # Bootstrap (imperative - runs once before Flux can operate)
+  # ===========================================================================
+  bootstrap:
+    desc: "Bootstrap: Kind cluster + Cilium CNI + Flux"
+    cmds:
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - echo "Installing Flux..."
+      - flux install
+      - flux check
+      - echo "Bootstrap complete. Cluster has networking and GitOps."
+
+  # ===========================================================================
+  # Flux - apply infrastructure HelmReleases
+  # ===========================================================================
+  flux:apply:
+    desc: Apply Flux sources and infrastructure HelmReleases
+    cmds:
+      - echo "Applying Flux sources..."
+      - kubectl apply -f kubernetes/flux/sources.yaml
+      - echo "Applying metrics-server HelmRelease..."
+      - kubectl apply -f kubernetes/flux/metrics-server-release.yaml
+      - echo "Applying cert-manager HelmRelease..."
+      - kubectl apply -f kubernetes/flux/cert-manager-release.yaml
+      - echo "Applying Istio HelmReleases (base, istiod, ingressgateway)..."
+      - kubectl apply -f kubernetes/flux/istio-release.yaml
+      - echo "Applying KServe HelmReleases (CRD + resources + runtimes)..."
+      - kubectl apply -f kubernetes/flux/kserve-release.yaml
+      - echo "All HelmReleases applied. Flux is reconciling..."
+
+  flux:wait:
+    desc: Wait for Flux infrastructure HelmReleases to be Ready
+    cmds:
+      - echo "Waiting for cert-manager + Istio + metrics-server (Knative + KServe depend on them)..."
+      - |
+        for hr in "metrics-server/kube-system" "cert-manager/cert-manager" "istio-base/istio-system" "istiod/istio-system" "istio-ingressgateway/istio-system"; do
+          NAME=$(echo $hr | cut -d/ -f1)
+          NS=$(echo $hr | cut -d/ -f2)
+          echo "  Waiting for $NAME in $NS..."
+          kubectl wait helmrelease/$NAME -n $NS --for=condition=Ready --timeout=600s 2>/dev/null || \
+            echo "  WARNING: $NAME not ready yet"
+        done
+      - echo "Waiting for KServe CRDs (kserve-resources will not be Ready until Knative Serving is up)..."
+      - kubectl wait helmrelease/kserve-crd -n kserve --for=condition=Ready --timeout=300s || true
+
+  flux:wait:kserve:
+    desc: Wait for KServe HelmReleases (call AFTER knative:install)
+    cmds:
+      - echo "Restarting KServe controller so it discovers Knative Serving..."
+      - kubectl rollout restart deployment/kserve-controller-manager -n kserve
+      - kubectl rollout status deployment/kserve-controller-manager -n kserve --timeout=180s
+      - echo "Forcing kserve-resources reconcile..."
+      - flux reconcile helmrelease kserve-resources -n kserve --with-source 2>&1 || true
+      - kubectl wait helmrelease/kserve-resources -n kserve --for=condition=Ready --timeout=300s
+      - echo "Forcing kserve-runtime-configs reconcile..."
+      - flux reconcile helmrelease kserve-runtime-configs -n kserve --with-source 2>&1 || true
+      - kubectl wait helmrelease/kserve-runtime-configs -n kserve --for=condition=Ready --timeout=180s
+      - echo "Verifying ClusterServingRuntimes are installed..."
+      - kubectl get clusterservingruntime kserve-huggingfaceserver
+
+  flux:status:
+    desc: Show Flux HelmRelease status
+    cmds:
+      - flux get helmreleases -A
+
+  # ===========================================================================
+  # Knative Serving (post-Flux: operator + KnativeServing CR)
+  # The Knative Operator chart is published as a tarball on GitHub Releases
+  # which Flux HelmRepository cannot consume directly, so we install it with
+  # plain helm and let Flux own everything else.
+  # ===========================================================================
+  knative:install:
+    desc: Install Knative Operator + KnativeServing CR (Istio network layer)
+    cmds:
+      - echo "Installing Knative Operator {{.KNATIVE_OPERATOR_VERSION}}..."
+      - kubectl create namespace knative-operator --dry-run=client -o yaml | kubectl apply -f -
+      - >-
+        helm upgrade --install knative-operator
+        --namespace knative-operator
+        --version {{.KNATIVE_OPERATOR_VERSION}}
+        --set nodeSelector.workload=system
+        --wait
+        https://github.com/knative/operator/releases/download/knative-{{.KNATIVE_OPERATOR_VERSION}}/knative-operator-{{.KNATIVE_OPERATOR_VERSION}}.tgz
+      - echo "Applying KnativeServing CR..."
+      - kubectl apply -f kubernetes/knative/knative-serving.yaml
+      - echo "Waiting for Knative Serving to be Ready..."
+      - kubectl wait knativeserving/knative-serving -n knative-serving --for=condition=Ready --timeout=600s
+      - echo "Knative Serving is Ready."
+
+  knative:status:
+    desc: Show Knative Serving status and pods
+    cmds:
+      - echo "==> KnativeServing CR:"
+      - kubectl get knativeserving -A
+      - echo ""
+      - echo "==> Knative Serving pods:"
+      - kubectl get pods -n knative-serving
+
+  # ===========================================================================
+  # KServe runtime + InferenceService
+  # ===========================================================================
+  isvc:apply:
+    desc: Deploy the sklearn-iris InferenceService (live demo, runs on arm64+amd64)
+    cmds:
+      - echo "Creating llm namespace and sklearn-iris InferenceService..."
+      - kubectl apply -f kubernetes/kserve/namespace.yaml
+      - kubectl apply -f kubernetes/kserve/sklearn-isvc.yaml
+      - echo "InferenceService created. The sklearn model is small - ready in 30-90s."
+      - echo "Tail the predictor logs with kubectl logs -f -n {{.ISVC_NAMESPACE}} -l serving.kserve.io/inferenceservice={{.ISVC_NAME}} -c kserve-container"
+
+  isvc:apply-llm:
+    desc: Deploy the Qwen LLM InferenceService via KServe HF runtime (amd64/GPU only)
+    cmds:
+      - 'echo "WARNING - kserve/huggingfaceserver image is amd64-only at v0.18.0"'
+      - 'echo "On arm64 (Apple Silicon) this will hit ImagePullBackOff"'
+      - kubectl apply -f kubernetes/kserve/namespace.yaml
+      - kubectl apply -f kubernetes/kserve/qwen-isvc.yaml
+      - 'echo "LLM InferenceService created. Model download + load takes 2-4 minutes."'
+
+  isvc:apply-ollama:
+    desc: Deploy the Ollama LLM InferenceService (custom predictor, multi-arch)
+    cmds:
+      - kubectl apply -f kubernetes/kserve/namespace.yaml
+      - kubectl apply -f kubernetes/kserve/ollama-isvc.yaml
+      - 'echo "Ollama ISVC created. First start pulls qwen2.5:0.5b (~400 MB) - takes 2-5 min."'
+      - 'echo "Tail logs - kubectl logs -f -n llm -l serving.kserve.io/inferenceservice=ollama -c kserve-container"'
+
+  isvc:wait-ollama:
+    desc: Wait for the Ollama InferenceService to be Ready (long timeout for model pull)
+    cmds:
+      - 'echo "Waiting for Ollama InferenceService to be Ready (timeout 15m)..."'
+      - kubectl wait inferenceservice/ollama -n {{.ISVC_NAMESPACE}} --for=condition=Ready --timeout=900s
+      - 'echo "Ollama InferenceService is Ready."'
+
+  test:chat-ollama:
+    desc: Send an OpenAI chat-completions request to Ollama (in-cluster curl)
+    cmds:
+      - |
+        echo "==> Sending chat completion request to Ollama via in-cluster curl..."
+        echo "    (CPU LLM inference can take 30-90s for the first token)"
+        echo ""
+        kubectl run curl-ollama --image=curlimages/curl:latest -n {{.ISVC_NAMESPACE}} \
+          --restart=Never --rm -i --timeout=180s --quiet -- \
+          curl -sS -m 120 \
+            -H "Content-Type: application/json" \
+            http://ollama-predictor.{{.ISVC_NAMESPACE}}.svc.cluster.local/v1/chat/completions \
+            -d '{
+              "model": "qwen2.5:0.5b",
+              "messages": [
+                {"role": "system", "content": "You are a concise SRE assistant."},
+                {"role": "user", "content": "In one sentence, what is a Kubernetes Pod?"}
+              ],
+              "stream": false
+            }' | jq .
+
+  isvc:wait:
+    desc: Wait for the InferenceService to be Ready (downloads + loads the model)
+    cmds:
+      - echo "Waiting for InferenceService '{{.ISVC_NAME}}' to be Ready (timeout 15m)..."
+      - kubectl wait inferenceservice/{{.ISVC_NAME}} -n {{.ISVC_NAMESPACE}} --for=condition=Ready --timeout=900s
+      - echo "InferenceService is Ready."
+
+  isvc:status:
+    desc: Show InferenceService status
+    cmds:
+      - echo "==> InferenceServices:"
+      - kubectl get inferenceservices -n {{.ISVC_NAMESPACE}}
+      - echo ""
+      - echo "==> Predictor pods:"
+      - kubectl get pods -n {{.ISVC_NAMESPACE}}
+      - echo ""
+      - echo "==> Knative Service:"
+      - kubectl get ksvc -n {{.ISVC_NAMESPACE}} 2>/dev/null || echo "No Knative Service yet"
+      - echo ""
+      - echo "==> URL:"
+      - kubectl get inferenceservice {{.ISVC_NAME}} -n {{.ISVC_NAMESPACE}} -o jsonpath='{.status.url}' 2>/dev/null && echo
+
+  # ===========================================================================
+  # Tests - hit the KServe v1 prediction endpoint
+  # ===========================================================================
+  test:predict:
+    desc: Send a prediction request to sklearn-iris (in-cluster curl)
+    cmds:
+      - |
+        URL=$(kubectl get inferenceservice {{.ISVC_NAME}} -n {{.ISVC_NAMESPACE}} -o jsonpath='{.status.url}')
+        echo "==> InferenceService URL: $URL"
+        echo "==> Sending prediction (2 iris flowers)..."
+        echo ""
+        kubectl run curl-predict --image=curlimages/curl:latest -n {{.ISVC_NAMESPACE}} \
+          --restart=Never --rm -i --timeout=60s --quiet -- \
+          curl -sS -m 30 \
+            -H "Content-Type: application/json" \
+            http://{{.ISVC_NAME}}-predictor.{{.ISVC_NAMESPACE}}.svc.cluster.local/v1/models/{{.ISVC_NAME}}:predict \
+            -d '{
+              "instances": [
+                [6.8, 2.8, 4.8, 1.4],
+                [6.0, 3.4, 4.5, 1.6]
+              ]
+            }' | jq .
+
+  test:chat-qwen:
+    desc: (amd64/GPU only) Chat with the KServe HF runtime ISVC (qwen) - requires task isvc:apply-llm
+    cmds:
+      - |
+        URL=$(kubectl get inferenceservice qwen -n {{.ISVC_NAMESPACE}} -o jsonpath='{.status.url}' 2>/dev/null)
+        if [ -z "$URL" ]; then
+          echo "ERROR - qwen ISVC not Ready. Run 'task isvc:apply-llm' first (amd64/GPU hosts only)."
+          exit 1
+        fi
+        HOST=$(echo "$URL" | sed -e 's|http[s]*://||')
+        echo "==> Sending chat completion request to KServe HF runtime..."
+        kubectl run curl-qwen --image=curlimages/curl:latest -n {{.ISVC_NAMESPACE}} \
+          --restart=Never --rm -i --timeout=180s --quiet -- \
+          curl -sS -m 120 \
+            -H "Content-Type: application/json" \
+            "http://qwen-predictor.{{.ISVC_NAMESPACE}}.svc.cluster.local/openai/v1/chat/completions" \
+            -d '{
+              "model": "qwen",
+              "messages": [
+                {"role": "system", "content": "You are a concise SRE assistant."},
+                {"role": "user", "content": "In one sentence, what is a Kubernetes Pod?"}
+              ],
+              "max_tokens": 80,
+              "temperature": 0.2
+            }' | jq .
+
+  test:scale-to-zero:
+    desc: Watch the predictor pod scale to zero after no traffic
+    cmds:
+      - |
+        echo "==> Current predictor pods:"
+        kubectl get pods -n {{.ISVC_NAMESPACE}} -l serving.kserve.io/inferenceservice={{.ISVC_NAME}}
+        echo ""
+        echo "==> Wait ~90s with no traffic and the pod will terminate (scale-to-zero)."
+        echo "==> Watching pods for 2 minutes (Ctrl-C to stop early)..."
+        timeout 120 kubectl get pods -n {{.ISVC_NAMESPACE}} -l serving.kserve.io/inferenceservice={{.ISVC_NAME}} --watch || true
+        echo ""
+        echo "==> Final state:"
+        kubectl get pods -n {{.ISVC_NAMESPACE}} -l serving.kserve.io/inferenceservice={{.ISVC_NAME}} 2>/dev/null || \
+          echo "No pods - InferenceService scaled to zero."
+
+  test:cold-start:
+    desc: Trigger a cold start and time the first response (port-forward, measures only curl)
+    cmds:
+      - |
+        URL=$(kubectl get inferenceservice {{.ISVC_NAME}} -n {{.ISVC_NAMESPACE}} -o jsonpath='{.status.url}')
+        HOST=$(echo "$URL" | sed -e 's|http[s]*://||')
+        echo "==> Confirming pod count before request:"
+        ACTIVE=$(kubectl get pods -n {{.ISVC_NAMESPACE}} -l serving.kserve.io/inferenceservice={{.ISVC_NAME}} --no-headers 2>/dev/null | grep -v Terminating | wc -l | tr -d ' ')
+        if [ "$ACTIVE" = "0" ]; then
+          echo "(none - scaled to zero, this WILL be a cold start)"
+        else
+          kubectl get pods -n {{.ISVC_NAMESPACE}} -l serving.kserve.io/inferenceservice={{.ISVC_NAME}} --no-headers
+          echo "(pod is already running - this will be a WARM request)"
+        fi
+        echo ""
+        echo "==> Starting port-forward and waiting for it to be ready..."
+        kubectl port-forward -n istio-system svc/istio-ingressgateway 8080:80 >/dev/null 2>&1 &
+        PF_PID=$!
+        trap "kill $PF_PID 2>/dev/null" EXIT
+        for i in $(seq 1 20); do
+          if curl -sf -o /dev/null --max-time 1 http://localhost:8080/ 2>/dev/null; then break; fi
+          sleep 0.5
+        done
+        echo "==> Port-forward up. Sending prediction request and timing only the curl..."
+        time curl -sS -m 120 \
+          -H "Host: $HOST" \
+          -H "Content-Type: application/json" \
+          "http://localhost:8080/v1/models/{{.ISVC_NAME}}:predict" \
+          -d '{"instances": [[6.8, 2.8, 4.8, 1.4]]}'
+        echo ""
+        kill $PF_PID 2>/dev/null || true
+        wait 2>/dev/null || true
+        exit 0
+
+  # ===========================================================================
+  # Full setup
+  # ===========================================================================
+  setup:
+    desc: "Full setup: bootstrap -> Flux infra -> Knative -> KServe ready -> sklearn + Ollama ISVCs"
+    cmds:
+      - task: bootstrap
+      - task: flux:apply
+      - task: flux:wait
+      - task: knative:install
+      - task: flux:wait:kserve
+      - task: isvc:apply
+      - task: isvc:wait
+      - task: isvc:apply-ollama
+      - task: isvc:wait-ollama
+      - |
+        echo ""
+        echo "================================================="
+        echo "  KServe + Qwen LLM is ready."
+        echo "================================================="
+        echo ""
+        echo "Test:"
+        echo "  task test:chat            - OpenAI chat completions"
+        echo "  task test:completion      - OpenAI completions"
+        echo "  task test:scale-to-zero   - watch the pod terminate after no traffic"
+        echo "  task test:cold-start      - trigger and time a cold start"
+        echo ""
+        echo "Status:"
+        echo "  task flux:status          - all Flux HelmReleases"
+        echo "  task knative:status       - Knative Serving pods"
+        echo "  task isvc:status          - InferenceService + predictor pods"
+
+  # ===========================================================================
+  # Cleanup
+  # ===========================================================================
+  clean:isvc:
+    desc: Remove the InferenceService (keep cluster + KServe)
+    cmds:
+      - kubectl delete -f kubernetes/kserve/qwen-isvc.yaml --ignore-not-found
+      - kubectl delete namespace {{.ISVC_NAMESPACE}} --ignore-not-found
+
+  clean:
+    desc: Delete the entire Kind cluster
+    cmds:
+      - task: shared:cluster:delete

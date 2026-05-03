@@ -1,0 +1,56 @@
+# =============================================================================
+# KnativeServing CR - applied AFTER the Knative Operator is installed
+# Configures Knative Serving 1.22.0 with Istio as the network layer
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knative-serving
+---
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+spec:
+  version: "1.22.0"
+  config:
+    deployment:
+      registries-skipping-tag-resolving: "nvcr.io,index.docker.io,docker.io,registry.k8s.io,ghcr.io"
+    domain:
+      # Empty value patches the default svc.cluster.local domain to example.com
+      # so Knative routes are reachable through the ingress gateway
+      example.com: ""
+    autoscaler:
+      # Allow scale-to-zero (the headline KServe demo)
+      enable-scale-to-zero: "true"
+      # Wait this long after no traffic before scaling to zero
+      scale-to-zero-grace-period: "30s"
+      # Stable window for scaling decisions
+      stable-window: "60s"
+    features:
+      # Allow nodeSelector / tolerations / affinity on Knative Services
+      # (KServe sets nodeSelector when the InferenceService spec includes one)
+      kubernetes.podspec-nodeselector: "enabled"
+      kubernetes.podspec-tolerations: "enabled"
+      kubernetes.podspec-affinity: "enabled"
+  workloads:
+    - name: controller
+      nodeSelector:
+        workload: system
+    - name: activator
+      nodeSelector:
+        workload: system
+    - name: autoscaler
+      nodeSelector:
+        workload: system
+    - name: webhook
+      nodeSelector:
+        workload: system
+    - name: net-istio-controller
+      nodeSelector:
+        workload: system
+    - name: net-istio-webhook
+      nodeSelector:
+        workload: system

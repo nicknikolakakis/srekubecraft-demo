@@ -1,0 +1,65 @@
+# =============================================================================
+# Kind cluster for the KServe + LLM demo
+# 1 control-plane + 2 workers
+#  - worker (system):     Istio, Knative, KServe controller, cert-manager, Flux
+#  - worker (inference):  runs the predictor pods (sklearn, Ollama). Simulates
+#                         a GPU/inference nodepool. Cilium CNI, no kube-proxy.
+#
+# Sizing note: the cluster sits at ~5.9 GB resident with both ISVCs running.
+# Allocate at least 8 GB RAM to Docker Desktop.
+# =============================================================================
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kserve-llm
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+  disableDefaultCNI: true
+  kubeProxyMode: "none"
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+    extraMounts:
+      - hostPath: /tmp/kserve-llm/control-plane
+        containerPath: /var/local-path-provisioner
+
+  # System workloads: Istio, Knative, KServe controller, cert-manager
+  - role: worker
+    labels:
+      workload: system
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "workload=system"
+    extraMounts:
+      - hostPath: /tmp/kserve-llm/worker-system
+        containerPath: /var/local-path-provisioner
+
+  # Inference workloads: the LLM pod lands here (simulates a GPU nodepool)
+  - role: worker
+    labels:
+      workload: inference
+      accelerator: cpu
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "workload=inference,accelerator=cpu"
+    extraMounts:
+      - hostPath: /tmp/kserve-llm/worker-inference
+        containerPath: /var/local-path-provisioner

@@ -1,0 +1,33 @@
+# =============================================================================
+# Flux HelmRelease - Kubernetes Metrics Server
+# Provides node + pod CPU/memory metrics for kubectl top, HPA, and the
+# Knative HPA-class autoscaler.
+# =============================================================================
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metrics-server
+  namespace: kube-system
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: metrics-server
+      version: "3.13.0"
+      sourceRef:
+        kind: HelmRepository
+        name: metrics-server
+        namespace: flux-system
+  values:
+    args:
+      # Kind clusters use self-signed kubelet certs - skip TLS verification
+      - --kubelet-insecure-tls
+    nodeSelector:
+      workload: system
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
