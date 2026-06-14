@@ -1,0 +1,26 @@
+# VCS and editor noise
+.git
+.gitignore
+.dockerignore
+
+# Local environment and runtime artifacts
+.env
+.env.example
+sessions.db
+*.exe
+key.json
+
+# Deployment manifests are not needed inside the image
+k8s/
+
+# Docs
+README.md
+*.md
+!skills/**/*.md
+
+# Build outputs that may be present from local `go build`
+/agent
+/k8s-adk-agent
+
+# Self-reference
+Dockerfile

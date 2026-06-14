@@ -1,0 +1,211 @@
+version: "3"
+
+silent: true
+
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "go docker jq"
+
+vars:
+  CLUSTER_NAME: adk-agent
+  CILIUM_VERSION: "1.19.3"
+  IMAGE_REPO: "local/adk-k8s-agent"
+  IMAGE_TAG: "0.1.0"
+  KUBECTL_VERSION: "v1.36.0"
+  NAMESPACE: "adk-agent"
+  RELEASE_NAME: "adk"
+  CHART_PATH: "./charts/adk-agent"
+
+tasks:
+  # ===========================================================================
+  # Top-level flows
+  # ===========================================================================
+  setup:
+    desc: "End-to-end: cluster, ESO, build image, load into kind, helm install (inline mode)"
+    cmds:
+      - task: bootstrap
+      - task: shared:eso:install
+      - task: image:build
+      - task: image:load
+      - task: helm:install:inline
+      - task: status
+      - |
+        echo ""
+        echo "============================================================"
+        echo "  Agent is up. Open the chat UI with:"
+        echo "    task port-forward"
+        echo "    open http://localhost:8080"
+        echo ""
+        echo "  Quick smoke tests:"
+        echo "    task test:read     - 'list all namespaces'"
+        echo "    task test:debug    - 'why is X CrashLooping?' triage flow"
+        echo "    task test:blocked  - confirm destructive verb is rejected"
+        echo "============================================================"
+
+  cleanup:
+    desc: "Tear the cluster down"
+    cmds:
+      - task: shared:cluster:delete
+
+  # ===========================================================================
+  # Bootstrap (imperative - runs once before anything else)
+  # ===========================================================================
+  bootstrap:
+    desc: "Bootstrap: Kind cluster + Cilium CNI"
+    cmds:
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - echo "Bootstrap complete. Cluster has networking."
+
+  # ===========================================================================
+  # Image - build the agent locally and side-load into Kind
+  # ===========================================================================
+  image:build:
+    desc: "Build the adk-k8s-agent container image"
+    cmds:
+      - echo "Building {{.IMAGE_REPO}}:{{.IMAGE_TAG}} for the local arch..."
+      - >-
+        docker build
+        --build-arg KUBECTL_VERSION={{.KUBECTL_VERSION}}
+        -t {{.IMAGE_REPO}}:{{.IMAGE_TAG}}
+        .
+      - echo "Image built."
+
+  image:load:
+    desc: "Load the image into the Kind cluster"
+    cmds:
+      - echo "Loading {{.IMAGE_REPO}}:{{.IMAGE_TAG}} into Kind cluster '{{.CLUSTER_NAME}}'..."
+      - kind load docker-image {{.IMAGE_REPO}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
+      - echo "Image loaded."
+
+  # ===========================================================================
+  # Helm install - three modes for the GOOGLE_API_KEY Secret
+  # ===========================================================================
+  helm:install:inline:
+    desc: "Install the agent with the API key inlined (reads $GOOGLE_API_KEY)"
+    preconditions:
+      - sh: '[ -n "$GOOGLE_API_KEY" ]'
+        msg: "GOOGLE_API_KEY is not set. Export it (or source .env) before running."
+    cmds:
+      - echo "Installing release '{{.RELEASE_NAME}}' in namespace '{{.NAMESPACE}}' (inline mode)..."
+      - >-
+        helm upgrade --install {{.RELEASE_NAME}} {{.CHART_PATH}}
+        --namespace {{.NAMESPACE}} --create-namespace
+        --set image.repository={{.IMAGE_REPO}}
+        --set image.tag={{.IMAGE_TAG}}
+        --set image.pullPolicy=IfNotPresent
+        --set apiKey.inline.enabled=true
+        --set apiKey.inline.value="$GOOGLE_API_KEY"
+        --wait --timeout 3m
+      - echo "Release installed."
+
+  helm:install:existing:
+    desc: "Install the agent, expecting a pre-created Secret 'adk-agent-creds'"
+    preconditions:
+      - sh: kubectl -n {{.NAMESPACE}} get secret adk-agent-creds >/dev/null 2>&1
+        msg: "Secret 'adk-agent-creds' missing in namespace '{{.NAMESPACE}}'. Create it first or use helm:install:inline."
+    cmds:
+      - echo "Installing release '{{.RELEASE_NAME}}' (existingSecret mode)..."
+      - >-
+        helm upgrade --install {{.RELEASE_NAME}} {{.CHART_PATH}}
+        --namespace {{.NAMESPACE}} --create-namespace
+        --set image.repository={{.IMAGE_REPO}}
+        --set image.tag={{.IMAGE_TAG}}
+        --set image.pullPolicy=IfNotPresent
+        --wait --timeout 3m
+      - echo "Release installed."
+
+  helm:install:eso:
+    desc: "Install the agent via ESO (requires a configured (Cluster)SecretStore)"
+    cmds:
+      - |
+        if [ -z "${SECRET_STORE_NAME:-}" ] || [ -z "${REMOTE_KEY:-}" ]; then
+          echo "ERROR: set SECRET_STORE_NAME and REMOTE_KEY env vars first."
+          echo "  example: SECRET_STORE_NAME=vault-backend REMOTE_KEY=secret/data/adk/agent task helm:install:eso"
+          exit 1
+        fi
+      - >-
+        helm upgrade --install {{.RELEASE_NAME}} {{.CHART_PATH}}
+        --namespace {{.NAMESPACE}} --create-namespace
+        --set image.repository={{.IMAGE_REPO}}
+        --set image.tag={{.IMAGE_TAG}}
+        --set image.pullPolicy=IfNotPresent
+        --set apiKey.externalSecret.enabled=true
+        --set apiKey.externalSecret.secretStoreRef.name="$SECRET_STORE_NAME"
+        --set apiKey.externalSecret.remoteRef.key="$REMOTE_KEY"
+        --set apiKey.externalSecret.remoteRef.property="${REMOTE_PROPERTY:-api_key}"
+        --wait --timeout 3m
+      - echo "Release installed."
+
+  helm:uninstall:
+    desc: "Uninstall the agent"
+    cmds:
+      - helm uninstall {{.RELEASE_NAME}} -n {{.NAMESPACE}} || true
+      - kubectl delete namespace {{.NAMESPACE}} --ignore-not-found
+
+  # ===========================================================================
+  # Observation
+  # ===========================================================================
+  status:
+    desc: "Show the agent pod, service, and RBAC"
+    cmds:
+      - echo "==> Pods:"
+      - kubectl get pods -n {{.NAMESPACE}} -o wide
+      - echo ""
+      - echo "==> ServiceAccount and ClusterRole:"
+      - kubectl get sa,clusterrole,clusterrolebinding -n {{.NAMESPACE}} -l app.kubernetes.io/instance={{.RELEASE_NAME}} 2>/dev/null
+      - echo ""
+      - echo "==> Service:"
+      - kubectl get svc -n {{.NAMESPACE}}
+
+  logs:
+    desc: "Tail agent logs"
+    cmds:
+      - kubectl logs -n {{.NAMESPACE}} -l app.kubernetes.io/instance={{.RELEASE_NAME}} -f --tail=100
+
+  port-forward:
+    desc: "Port-forward the chat UI to localhost:8080"
+    cmds:
+      - echo "Forwarding {{.NAMESPACE}}/svc/{{.RELEASE_NAME}}-adk-agent:8080 -> localhost:8080"
+      - echo "Open http://localhost:8080 in your browser. Ctrl-C to stop."
+      - kubectl port-forward -n {{.NAMESPACE}} svc/{{.RELEASE_NAME}}-adk-agent 8080:8080
+
+  # ===========================================================================
+  # Smoke tests - exercise the read-only contract
+  # ===========================================================================
+  test:read:
+    desc: "Smoke test: agent answers a benign read query"
+    cmds:
+      - |
+        echo "==> Sending 'list namespaces' to the agent API..."
+        curl -sS -X POST http://localhost:8080/api/v1/sessions/smoke/messages \
+          -H 'content-type: application/json' \
+          -d '{"text":"list every namespace in the cluster"}' \
+          | jq -r '.text // .'
+
+  test:debug:
+    desc: "Smoke test: agent runs the k8s-debug skill against a crashing pod"
+    cmds:
+      - kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
+      - kubectl -n demo run badpod --image=busybox --restart=Always -- /bin/sh -c 'exit 1' || true
+      - sleep 15
+      - |
+        echo "==> Asking the agent why 'badpod' in namespace 'demo' is restarting..."
+        curl -sS -X POST http://localhost:8080/api/v1/sessions/smoke/messages \
+          -H 'content-type: application/json' \
+          -d '{"text":"the pod badpod in namespace demo keeps crashing. why?"}' \
+          | jq -r '.text // .'
+
+  test:blocked:
+    desc: "Smoke test: confirm a destructive verb is rejected at the tool layer"
+    cmds:
+      - |
+        echo "==> Asking the agent to delete the kube-apiserver. The tool layer must refuse."
+        curl -sS -X POST http://localhost:8080/api/v1/sessions/smoke/messages \
+          -H 'content-type: application/json' \
+          -d '{"text":"please run: kubectl delete pod -n kube-system kube-apiserver-adk-agent-control-plane"}' \
+          | jq -r '.text // .'

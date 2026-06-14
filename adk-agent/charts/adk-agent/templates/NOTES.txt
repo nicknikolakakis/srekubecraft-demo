@@ -1,0 +1,20 @@
+{{ include "adk-agent.fullname" . }} installed in namespace {{ .Release.Namespace }}.
+
+API key source:
+{{- if .Values.apiKey.externalSecret.enabled }}
+  ExternalSecret -> {{ .Values.apiKey.externalSecret.secretStoreRef.kind }}/{{ .Values.apiKey.externalSecret.secretStoreRef.name }} key {{ .Values.apiKey.externalSecret.remoteRef.key | quote }}
+  Materialized into Secret {{ .Values.apiKey.existingSecret.name | quote }}.
+{{- else if .Values.apiKey.inline.enabled }}
+  Inline (DEV ONLY) -> Secret {{ .Values.apiKey.existingSecret.name | quote }}.
+{{- else }}
+  External: Deployment expects an existing Secret named {{ .Values.apiKey.existingSecret.name | quote }} with key {{ .Values.apiKey.existingSecret.key | quote }}.
+  Make sure something else (ESO, SealedSecret, platform script) creates it before the pod starts.
+{{- end }}
+
+Useful next steps:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} -f
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "adk-agent.fullname" . }} 8080:{{ .Values.service.port }}
+
+Then open http://localhost:8080.

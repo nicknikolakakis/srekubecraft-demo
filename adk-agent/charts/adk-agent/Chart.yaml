@@ -1,0 +1,18 @@
+apiVersion: v2
+name: adk-agent
+description: Read-only Kubernetes operations assistant built on Google ADK (Go).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://adk.dev/
+sources:
+  - https://github.com/google/adk-go
+maintainers:
+  - name: nonicked
+keywords:
+  - adk
+  - agent
+  - gemini
+  - kubernetes
+  - sre

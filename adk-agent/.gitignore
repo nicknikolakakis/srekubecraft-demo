@@ -1,0 +1,7 @@
+.env
+sessions.db
+key.json
+/agent
+/k8s-adk-agent
+*.exe
+.DS_Store

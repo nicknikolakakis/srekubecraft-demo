@@ -1,0 +1,117 @@
+# Default values for adk-agent.
+# Override any field with `helm install ... --set key=value` or `-f myvalues.yaml`.
+
+image:
+  repository: REGISTRY/adk-k8s-agent
+  # tag defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+replicaCount: 1
+revisionHistoryLimit: 3
+
+# How the GOOGLE_API_KEY reaches the pod.
+#
+# The Deployment always reads from the Secret named `existingSecret.name` with
+# key `existingSecret.key`. The three modes below decide who creates that Secret:
+#
+#   1. (default) existingSecret only
+#        Some other process (a platform team script, a SealedSecret, your own
+#        ExternalSecret) maintains the Secret. The chart does not render it.
+#
+#   2. externalSecret.enabled = true
+#        The chart renders an ExternalSecret resource. The cluster must have the
+#        external-secrets operator installed and a (Cluster)SecretStore that
+#        knows how to talk to your backend (Vault, AWS Secrets Manager, GCP
+#        Secret Manager, Azure Key Vault, 1Password, etc.). ESO will materialize
+#        the Secret named existingSecret.name with key existingSecret.key.
+#
+#   3. inline.enabled = true (DEV ONLY)
+#        The chart renders the Secret directly from values. Never use this in
+#        production; the value ends up in your Helm release and any backups.
+#
+# externalSecret and inline are mutually exclusive.
+apiKey:
+  existingSecret:
+    name: "adk-agent-creds"
+    key: "GOOGLE_API_KEY"
+
+  externalSecret:
+    enabled: false
+    # ESO v1 is GA as of operator v0.16+. v1beta1 still accepted.
+    apiVersion: external-secrets.io/v1
+    refreshInterval: "1h"
+    secretStoreRef:
+      name: ""                  # required when enabled, e.g. "vault-backend"
+      kind: ClusterSecretStore  # or SecretStore (namespace-scoped)
+    remoteRef:
+      key: ""                   # required, e.g. "secret/data/adk/agent" (Vault) or "prod/adk/google-api-key" (AWS SM)
+      property: ""              # optional, when the upstream secret holds multiple fields
+      conversionStrategy: ""    # optional: Default | Unicode
+      decodingStrategy: ""      # optional: None | Base64 | Base64URL | Auto
+
+  inline:
+    enabled: false
+    value: ""
+
+# Cluster-wide read RBAC. Disable if you bind your own (Cluster)Role to the SA.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""        # defaults to release fullname
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+    ephemeral-storage: 64Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+    ephemeral-storage: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+probes:
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 20
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+volumeSizes:
+  tmp: 64Mi
+  kubeCache: 32Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+extraEnvFrom: []
