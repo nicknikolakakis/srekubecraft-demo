@@ -1,0 +1,13 @@
+# =============================================================================
+# Gateway API Inference Extension (GAIE) CRDs - v1.5.0
+# Provides the InferencePool + InferenceObjective CRDs
+# (inference.networking.k8s.io) that the llm-d router chart depends on.
+# Version pinned to match llm-d v0.8.x guides/env.sh (GAIE_VERSION=v1.5.0).
+#
+# Apply with server-side to avoid the CRD annotation size limit:
+#   kubectl apply --server-side -k kubernetes/gaie
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/v1-manifests.yaml

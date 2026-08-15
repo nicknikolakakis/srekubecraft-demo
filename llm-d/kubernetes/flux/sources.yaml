@@ -1,0 +1,14 @@
+# =============================================================================
+# Flux HelmRepository source for the llm-d demo
+# The llm-d router chart is published via OCI on ghcr.io
+# =============================================================================
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: llm-d
+  namespace: flux-system
+spec:
+  type: oci
+  interval: 1h
+  url: oci://ghcr.io/llm-d/charts

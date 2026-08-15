@@ -1,0 +1,170 @@
+version: "3"
+
+silent: true
+
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "flux jq"
+
+vars:
+  CLUSTER_NAME: llm-d-demo
+  CILIUM_VERSION: "1.19.3"
+  NAMESPACE: "llm-d"
+  RELEASE: "llm-d-router"
+  # the chart names the Service after the EPP, not the release
+  SVC: "llm-d-router-epp"
+  MODEL: "Qwen/Qwen3-0.6B"
+
+tasks:
+  # ===========================================================================
+  # Bootstrap (imperative - runs once before Flux can operate)
+  # ===========================================================================
+  bootstrap:
+    desc: "Bootstrap: Kind cluster + Cilium CNI + Flux"
+    cmds:
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - echo "Installing Flux..."
+      - flux install
+      - flux check
+      - echo "Bootstrap complete. Cluster has networking and GitOps."
+
+  # ===========================================================================
+  # GAIE CRDs (imperative - the router chart's InferencePool depends on them)
+  # ===========================================================================
+  crds:apply:
+    desc: Install the Gateway API Inference Extension CRDs (v1.5.0)
+    cmds:
+      - echo "Installing GAIE CRDs (inference.networking.k8s.io)..."
+      - kubectl apply --server-side -k kubernetes/gaie
+      - kubectl wait --for=condition=Established crd/inferencepools.inference.networking.k8s.io --timeout=60s
+      - echo "GAIE CRDs established."
+
+  # ===========================================================================
+  # Flux - apply the llm-d router HelmRelease
+  # ===========================================================================
+  flux:apply:
+    desc: Apply Flux source and the llm-d router HelmRelease
+    cmds:
+      - echo "Applying Flux HelmRepository source..."
+      - kubectl apply -f kubernetes/flux/sources.yaml
+      - echo "Applying llm-d router HelmRelease..."
+      - kubectl apply -f kubernetes/flux/router-release.yaml
+      - echo "Flux is reconciling the router..."
+
+  flux:wait:
+    desc: Wait for the router HelmRelease to be Ready
+    cmds:
+      - echo "Waiting for the llm-d-router HelmRelease..."
+      - kubectl wait helmrelease/{{.RELEASE}} -n {{.NAMESPACE}} --for=condition=Ready --timeout=300s
+      - echo "Router is Ready."
+
+  # ===========================================================================
+  # Simulated model servers
+  # ===========================================================================
+  sim:apply:
+    desc: Deploy the 4 llm-d-inference-sim model servers
+    cmds:
+      - echo "Deploying sim model servers (4 replicas, no GPU)..."
+      - kubectl apply -f kubernetes/modelserver/sim-deployment.yaml
+      - echo "Waiting for sim pods to be ready..."
+      - kubectl rollout status deployment/qwen-sim -n {{.NAMESPACE}} --timeout=180s
+
+  # ===========================================================================
+  # Tests - drive traffic through the router and observe the routing
+  # ===========================================================================
+  test:route:
+    desc: Send two shared-prefix requests and confirm cache-aware routing
+    cmds:
+      - |
+        echo "==> Port-forwarding the router Service ({{.SVC}}:80)..."
+        kubectl port-forward -n {{.NAMESPACE}} svc/{{.SVC}} 8080:80 >/dev/null 2>&1 &
+        PF_PID=$!
+        trap "kill $PF_PID 2>/dev/null" EXIT
+        for i in $(seq 1 20); do
+          curl -sf -o /dev/null --max-time 1 http://localhost:8080/ 2>/dev/null && break
+          sleep 0.5
+        done
+        PROMPT="You are an SRE assistant. Summarize this runbook in one line: restart the pod, check the probes, verify the rollout."
+        echo "==> Request 1 (cold - lands anywhere):"
+        curl -sS -m 30 http://localhost:8080/v1/completions \
+          -H 'Content-Type: application/json' \
+          -d "{\"model\":\"{{.MODEL}}\",\"prompt\":\"$PROMPT\",\"max_tokens\":24}" | jq -r '.choices[0].text // .'
+        echo ""
+        echo "==> Request 2 (same prefix - should hit the same pod via prefix-cache scorer):"
+        curl -sS -m 30 http://localhost:8080/v1/completions \
+          -H 'Content-Type: application/json' \
+          -d "{\"model\":\"{{.MODEL}}\",\"prompt\":\"$PROMPT\",\"max_tokens\":24}" | jq -r '.choices[0].text // .'
+        kill $PF_PID 2>/dev/null || true
+
+  metrics:rbac:
+    desc: Grant the RBAC needed to scrape the EPP /metrics endpoint
+    cmds:
+      - kubectl apply -f kubernetes/metrics/rbac.yaml
+
+  test:metrics:
+    desc: Show the Endpoint Picker scorer metrics
+    cmds:
+      - |
+        echo "==> Port-forwarding the EPP metrics port (9090)..."
+        TOKEN=$(kubectl create token default -n {{.NAMESPACE}} --duration=10m)
+        kubectl port-forward -n {{.NAMESPACE}} svc/{{.SVC}} 9090:9090 >/dev/null 2>&1 &
+        PF_PID=$!
+        trap "kill $PF_PID 2>/dev/null" EXIT
+        sleep 3
+        echo "==> Scorer / routing metrics:"
+        OUT=$(curl -s -H "Authorization: Bearer $TOKEN" http://localhost:9090/metrics | grep -Ei 'inference_|prefix|score|queue|kv' | head -30)
+        if [ -n "$OUT" ]; then echo "$OUT"; else
+          echo "(no metrics on :9090 - run 'task metrics:rbac'; the EPP returns 401 without a token)"
+        fi
+        kill $PF_PID 2>/dev/null || true
+
+  status:
+    desc: Show the router, InferencePool, and sim pod status
+    cmds:
+      - echo "==> HelmRelease:"
+      - kubectl get helmrelease -n {{.NAMESPACE}}
+      - echo ""
+      - echo "==> InferencePool:"
+      - kubectl get inferencepool -n {{.NAMESPACE}} 2>/dev/null || echo "none yet"
+      - echo ""
+      - echo "==> Router + sim pods:"
+      - kubectl get pods -n {{.NAMESPACE}} -o wide
+      - echo ""
+      - echo "==> Services:"
+      - kubectl get svc -n {{.NAMESPACE}}
+
+  # ===========================================================================
+  # Full setup
+  # ===========================================================================
+  setup:
+    desc: "Full setup: bootstrap -> GAIE CRDs -> router -> sim -> ready"
+    cmds:
+      - task: bootstrap
+      - task: crds:apply
+      - task: flux:apply
+      - task: sim:apply
+      - task: flux:wait
+      - task: metrics:rbac
+      - |
+        echo ""
+        echo "================================================="
+        echo "  llm-d (simulated) is ready."
+        echo "================================================="
+        echo ""
+        echo "Test:"
+        echo "  task test:route     - shared-prefix requests through the router"
+        echo "  task test:metrics   - Endpoint Picker scorer metrics"
+        echo "  task status         - router + InferencePool + sim pods"
+
+  # ===========================================================================
+  # Cleanup
+  # ===========================================================================
+  clean:
+    desc: Delete the entire Kind cluster
+    cmds:
+      - task: shared:cluster:delete

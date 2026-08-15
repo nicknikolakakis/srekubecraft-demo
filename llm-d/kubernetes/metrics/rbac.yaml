@@ -1,0 +1,43 @@
+# =============================================================================
+# RBAC for scraping the Endpoint Picker /metrics endpoint.
+#
+# The EPP protects :9090 - it returns 401 without a bearer token, and 500
+# ("Authentication failed") if it cannot run a TokenReview itself. The router
+# chart ships neither binding, so both are created here:
+#   - system:auth-delegator on the EPP SA, so it can validate tokens
+#   - a /metrics reader role bound to the default SA, whose token we curl with
+# =============================================================================
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llm-d-epp-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: llm-d-router-epp
+    namespace: llm-d
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: llm-d-metrics-reader
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llm-d-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llm-d-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: llm-d

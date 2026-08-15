@@ -1,0 +1,91 @@
+# =============================================================================
+# llm-d-inference-sim model servers - the GPU-free stand-in for vLLM.
+# A lightweight, OpenAI-compatible simulator that mimics vLLM behaviour
+# (token streaming, prefix-cache hits, KV-cache + queue Prometheus metrics)
+# without a GPU or a real model. Four replicas so the Endpoint Picker has
+# something to route across.
+#
+# The vLLM render sidecar (for high-fidelity tokenization) is intentionally
+# omitted to keep this laptop-light - --force-dummy-tokenizer is what makes
+# that safe, since a real HF model name otherwise requires the render service.
+#
+# Label app=qwen-sim is what the router InferencePool selects on.
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-sim
+  namespace: llm-d
+  labels:
+    app: qwen-sim
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: qwen-sim
+  template:
+    metadata:
+      labels:
+        app: qwen-sim
+    spec:
+      nodeSelector:
+        workload: inference
+      containers:
+        - name: vllm-sim
+          image: "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--model=Qwen/Qwen3-0.6B"
+            - "--port=8000"
+            - "--mode=random"
+            - "--max-num-seqs=16"
+            # real HF model name would need the render service on :8082
+            - "--force-dummy-tokenizer"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-sim
+  namespace: llm-d
+  labels:
+    app: qwen-sim
+spec:
+  selector:
+    app: qwen-sim
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

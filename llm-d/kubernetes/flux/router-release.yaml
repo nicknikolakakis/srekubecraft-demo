@@ -1,0 +1,115 @@
+# =============================================================================
+# Flux HelmRelease - llm-d router (standalone mode)
+# Deploys the Endpoint Picker (EPP) + a bundled Envoy proxy and creates the
+# InferencePool that selects the sim model servers. Standalone mode needs no
+# external Gateway/LoadBalancer, so it runs cleanly on Kind - you curl the
+# router Service directly.
+#
+# Depends on: the GAIE CRDs (inference.networking.k8s.io) applied by
+# `task crds:apply` before Flux reconciles this release.
+#
+# Chart:  oci://ghcr.io/llm-d/charts/llm-d-router-standalone  (v0.9.0)
+# Values verified against config/charts/llm-d-router-standalone/values.yaml
+# and guides/optimized-baseline/router/optimized-baseline.values.yaml.
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-d
+  labels:
+    app.kubernetes.io/managed-by: flux
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: llm-d-router
+  namespace: llm-d
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: llm-d-router-standalone
+      version: "v0.9.0"
+      sourceRef:
+        kind: HelmRepository
+        name: llm-d
+        namespace: flux-system
+  values:
+    router:
+      # Point the InferencePool at the sim model servers (REQUIRED matchLabels)
+      modelServers:
+        matchLabels:
+          app: qwen-sim
+        targetPorts:
+          - number: 8000
+        protocol: http
+
+      inferencePool:
+        failureMode: "FailOpen"
+
+      # Expose the Envoy proxy on :80 so we can curl svc/llm-d-router directly
+      extraServicePorts:
+        - name: http
+          port: 80
+          protocol: TCP
+          targetPort: 8081
+
+      # The scorer chain that makes routing inference-aware. Weights favour
+      # prefix-cache reuse, then spread cold requests and balance KV/queue load.
+      epp:
+        replicas: 1
+        # Laptop sizing - the chart defaults to cpu:4 / mem:8Gi
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            memory: "1Gi"
+        pluginsConfigFile: "optimized-baseline-plugins.yaml"
+        pluginsCustomConfig:
+          optimized-baseline-plugins.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: prefix-cache-scorer
+            - type: no-hit-lru-scorer
+            schedulingProfiles:
+            - name: default
+              plugins:
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+              - pluginRef: prefix-cache-scorer
+                weight: 3
+              - pluginRef: no-hit-lru-scorer
+                weight: 2
+
+      # The Envoy proxy runs as a sidecar in the EPP pod (standalone default)
+      proxy:
+        enabled: true
+        proxyType: envoy
+        mode: sidecar
+        failOpen: true
+        # Laptop sizing - the chart defaults to cpu:4 / mem:8Gi
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            memory: "512Mi"
+
+    # Keep the whole router on the system node
+    nodeSelector:
+      workload: system
+  install:
+    crds: Create
+    remediation:
+      retries: 3
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
