@@ -1,0 +1,35 @@
+# Flux-managed install of the agent-sandbox controller + extension CRDs.
+# The upstream k8s/ kustomization renders the same bundle as the
+# sandbox-with-extensions.yaml release asset (controller declared once,
+# extensions enabled).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: agent-sandbox
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://github.com/kubernetes-sigs/agent-sandbox
+  ref:
+    tag: v0.5.6
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agent-sandbox
+  namespace: flux-system
+spec:
+  interval: 1h
+  sourceRef:
+    kind: GitRepository
+    name: agent-sandbox
+  path: ./k8s
+  prune: true
+  wait: true
+  timeout: 5m
+  # the source tree ships ko:// image refs that only resolve in the release
+  # pipeline; rewrite to the published controller image, pinned to digest
+  images:
+    - name: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller
+      newName: registry.k8s.io/agent-sandbox/agent-sandbox-controller
+      digest: sha256:a502cfdbcf550e77509cc56097978458a1ac3d5b59972f21b7ce0e0a84a5c12e

@@ -1,0 +1,17 @@
+# =============================================================================
+# Kind cluster for the agent-sandbox demo
+# 1 control-plane + 1 worker, Cilium CNI, no kube-proxy.
+# No host port mappings: the Go SDK talks to the sandbox-router over an
+# SPDY port-forward tunnel, so nothing needs to be exposed on the host.
+# =============================================================================
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: agent-sandbox-demo
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+  disableDefaultCNI: true
+  kubeProxyMode: "none"
+nodes:
+  - role: control-plane
+  - role: worker

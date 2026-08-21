@@ -1,0 +1,117 @@
+version: "3"
+
+silent: true
+
+includes:
+  shared:
+    taskfile: ../shared/Taskfile.yml
+    vars:
+      CLUSTER_NAME: "{{.CLUSTER_NAME}}"
+      CILIUM_VERSION: "{{.CILIUM_VERSION}}"
+      EXTRA_TOOLS: "flux jq go"
+
+vars:
+  CLUSTER_NAME: agent-sandbox-demo
+  CILIUM_VERSION: "1.20.1"
+  SANDBOX_VERSION: "v0.5.6"
+  NAMESPACE: "default"
+  POOL: "python-sandbox-pool"
+
+tasks:
+  # ===========================================================================
+  # Bootstrap (imperative - runs once before Flux can operate)
+  # ===========================================================================
+  bootstrap:
+    desc: "Bootstrap: Kind cluster + Cilium CNI + Flux"
+    cmds:
+      - task: shared:cluster:create
+      - task: shared:cilium:install
+      - echo "Installing Flux..."
+      - flux install
+      - flux check
+      - echo "Bootstrap complete. Cluster has networking and GitOps."
+
+  # ===========================================================================
+  # Flux - agent-sandbox controller + extensions from the upstream repo
+  # ===========================================================================
+  flux:apply:
+    desc: Apply the Flux GitRepository + Kustomization for agent-sandbox {{.SANDBOX_VERSION}}
+    cmds:
+      - echo "Applying agent-sandbox {{.SANDBOX_VERSION}} via Flux..."
+      - kubectl apply -f kubernetes/flux/agent-sandbox.yaml
+      - echo "Flux is reconciling the controller..."
+
+  flux:wait:
+    desc: Wait for the agent-sandbox Kustomization to be Ready
+    cmds:
+      - echo "Waiting for the agent-sandbox Kustomization..."
+      - kubectl wait kustomization/agent-sandbox -n flux-system --for=condition=Ready --timeout=300s
+      - kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=120s
+      - echo "agent-sandbox controller is Ready."
+
+  # ===========================================================================
+  # Sandbox plumbing - router, template, warm pool
+  # ===========================================================================
+  sandbox:apply:
+    desc: Deploy the sandbox-router, SandboxTemplate and SandboxWarmPool
+    cmds:
+      - echo "Deploying sandbox-router..."
+      # port-forward mode resolves the router in the claim namespace, so it lives in {{.NAMESPACE}}
+      - kubectl apply -f kubernetes/sandbox/router.yaml
+      - kubectl -n {{.NAMESPACE}} rollout status deployment/sandbox-router-deployment --timeout=180s
+      - echo "Creating SandboxTemplate + SandboxWarmPool..."
+      - kubectl apply -f kubernetes/sandbox/template.yaml
+      - kubectl apply -f kubernetes/sandbox/netpol.yaml
+      - echo "Waiting for warm pool sandboxes to become Ready..."
+      - kubectl wait sandbox --all -n {{.NAMESPACE}} --for=condition=Ready --timeout=300s
+      - kubectl get sandboxes,sandboxwarmpools -n {{.NAMESPACE}}
+
+  sandbox:status:
+    desc: Show sandboxes, claims and warm pool state
+    cmds:
+      - echo "==> Warm pool:"
+      - kubectl get sandboxwarmpools -n {{.NAMESPACE}}
+      - echo ""
+      - echo "==> Sandboxes:"
+      - kubectl get sandboxes -n {{.NAMESPACE}} -o wide
+      - echo ""
+      - echo "==> Claims:"
+      - kubectl get sandboxclaims -n {{.NAMESPACE}} 2>/dev/null || echo "No claims"
+      - echo ""
+      - echo "==> Pods:"
+      - kubectl get pods -n {{.NAMESPACE}} -l sandbox.agents.x-k8s.io/pool={{.POOL}} 2>/dev/null || kubectl get pods -n {{.NAMESPACE}}
+
+  # ===========================================================================
+  # Agent - the Go agentic loop with sandboxed tools
+  # ===========================================================================
+  agent:build:
+    desc: Build the Go agent
+    dir: agent
+    cmds:
+      - go build -o ../bin/sandbox-agent .
+      - echo "Built bin/sandbox-agent"
+
+  agent:run:
+    desc: 'Run the agent with a task (task agent:run -- "your task here")'
+    dir: agent
+    cmds:
+      - go run . -task "{{.CLI_ARGS}}"
+
+  # ===========================================================================
+  # Full setup + teardown
+  # ===========================================================================
+  up:
+    desc: Full setup - cluster, Flux, controller, router, warm pool
+    cmds:
+      - task: bootstrap
+      - task: flux:apply
+      - task: flux:wait
+      - task: sandbox:apply
+      - echo ""
+      - echo "Ready. Run the agent with:"
+      - echo '  task agent:run -- "write a python script that prints the first 10 fibonacci numbers and run it"'
+
+  down:
+    desc: Delete the Kind cluster (run this yourself)
+    cmds:
+      - task: shared:cluster:delete

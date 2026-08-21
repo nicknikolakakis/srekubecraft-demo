@@ -1,0 +1,58 @@
+# SandboxTemplate: blueprint for sandbox pods the warm pool pre-creates.
+# The python-runtime image runs a FastAPI server on 8888 that the SDK's
+# Run/Read/Write/List calls hit through the sandbox-router.
+# Vendored from upstream v0.5.6 python-sandbox-template.yaml, image pinned to digest.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: python-sandbox-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      # on real clusters: set runtimeClassName gvisor/kata-qemu for kernel isolation
+      containers:
+        - name: python-runtime
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox@sha256:9a096983d0a4cc0b05bb42926a4ed149b1b86c9c0ea82aea2486d005e2d34f48
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: "/"
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 1
+          livenessProbe:
+            httpGet:
+              path: "/"
+              port: 8888
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
+      restartPolicy: "OnFailure"
+  volumeClaimTemplatesPolicy: Overrides
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: "1Gi"
+---
+# SandboxWarmPool: keeps N sandboxes pre-warmed so a claim is served in
+# seconds instead of paying image pull + pod schedule + readiness on demand.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: python-sandbox-pool
+  namespace: default
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: python-sandbox-template
