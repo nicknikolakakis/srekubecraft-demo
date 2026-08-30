@@ -1,0 +1,13 @@
+# The one front door for the fleet; the composition installs MetalLB itself and the prefix is rewritten to the detected kind subnet at apply time.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceGateway
+metadata:
+  name: default
+spec:
+  backend: Traefik
+  traefik:
+    version: "40.2.0"
+    loadBalancer: MetalLB
+    metallb:
+      # disjoint from the workload pools (.100-.119 EU, .120-.139 US)
+      addressPool: "172.18.255.200-172.18.255.250"

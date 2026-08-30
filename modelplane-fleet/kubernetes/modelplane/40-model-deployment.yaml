@@ -1,0 +1,68 @@
+# Developer half of the contract: the shape of the hardware, never a cluster or a region.
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: mock-demo
+  namespace: ml-team
+spec:
+  replicas: 2
+  template:
+    spec:
+      engines:
+      - name: mock
+        members:
+        - role: Standalone
+          nodeSelector:
+            devices:
+            - name: gpu
+              count: 1
+              selectors:
+              - cel: |
+                  device.capacity["gpu.example.com"].memory.compareTo(quantity("20Gi")) >= 0
+          template:
+            spec:
+              containers:
+              - name: engine
+                image: python@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df
+                command: ["python", "-u", "-c"]
+                args:
+                - |
+                  import json, socket, http.server
+                  # Answer with the pod name, so a fleet request is traceable to a replica.
+                  where = socket.gethostname()
+                  class H(http.server.BaseHTTPRequestHandler):
+                      def _s(self, o, c=200):
+                          b = json.dumps(o).encode()
+                          self.send_response(c)
+                          self.send_header("content-type", "application/json")
+                          self.send_header("content-length", str(len(b)))
+                          self.end_headers()
+                          self.wfile.write(b)
+                      def do_GET(self):
+                          if self.path == "/health":
+                              self._s({"status": "ok"})
+                          elif self.path.startswith("/v1/models"):
+                              self._s({"object": "list", "data": [{"id": "mock", "object": "model"}]})
+                          else:
+                              self._s({"error": "not found"}, 404)
+                      def do_POST(self):
+                          n = int(self.headers.get("content-length") or 0)
+                          self.rfile.read(n)
+                          text = "served by %s" % where
+                          if self.path.startswith("/v1/messages"):
+                              self._s({
+                                  "id": "msg-mock", "type": "message", "role": "assistant",
+                                  "model": "mock", "stop_reason": "end_turn",
+                                  "content": [{"type": "text", "text": text}],
+                                  "usage": {"input_tokens": 1, "output_tokens": 1},
+                              })
+                          else:
+                              self._s({
+                                  "id": "chatcmpl-mock", "object": "chat.completion", "model": "mock",
+                                  "choices": [{"index": 0, "finish_reason": "stop",
+                                               "message": {"role": "assistant", "content": text}}],
+                                  "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                              })
+                      def log_message(self, *a):
+                          pass
+                  http.server.HTTPServer(("0.0.0.0", 8000), H).serve_forever()

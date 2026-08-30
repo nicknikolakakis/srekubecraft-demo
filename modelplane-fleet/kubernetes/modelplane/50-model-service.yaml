@@ -1,0 +1,11 @@
+# One OpenAI-compatible endpoint in front of every replica, wherever it landed.
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelService
+metadata:
+  name: mock
+  namespace: ml-team
+spec:
+  endpoints:
+  - selector:
+      matchLabels:
+        modelplane.ai/deployment: mock-demo

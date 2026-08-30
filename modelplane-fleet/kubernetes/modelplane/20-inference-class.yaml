@@ -1,0 +1,16 @@
+# Platform half of the contract: the device vocabulary a consumer writes CEL against.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceClass
+metadata:
+  name: synthetic-gpu
+spec:
+  description: "Fake GPU via dra-example-driver (no real hardware)"
+  devices:
+  - name: gpu
+    # DRA, not Synthetic: the scheduler rejects an engine whose only device is Synthetic
+    claim: DRA
+    driver: gpu.example.com
+    deviceClassName: gpu.example.com
+    count: 1
+    capacity:
+      memory: { value: "80Gi" }

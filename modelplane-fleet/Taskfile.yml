@@ -1,0 +1,247 @@
+version: "3"
+
+silent: true
+
+# =============================================================================
+# Fleet demo: one control plane, two workload clusters, no GPUs. No shared/ tasks: Cilium's kubeProxyReplacement fights the MetalLB L2 this needs.
+# =============================================================================
+
+vars:
+  CP: modelplane-control
+  EU: modelplane-eu-west
+  US: modelplane-us-east
+  CROSSPLANE_VERSION: "2.4.0"
+  MODELPLANE_VERSION: "v0.3.1"
+  METALLB_VERSION: "v0.16.0"
+  UPSTREAM: "https://raw.githubusercontent.com/modelplaneai/modelplane/{{.MODELPLANE_VERSION}}"
+  NS: ml-team
+  # kind bumps off 172.18 when earlier networks hold it; an off-subnet pool breaks cross-cluster routing silently
+  PREFIX:
+    sh: docker network inspect kind -f '{{`{{range .IPAM.Config}}{{println .Subnet}}{{end}}`}}' 2>/dev/null | grep -E '^[0-9]+\.' | head -1 | cut -d. -f1-2 || true
+
+tasks:
+  # ===========================================================================
+  # Pre-flight
+  # ===========================================================================
+  check:
+    desc: Check tools and Docker headroom
+    cmds:
+      - |
+        for cmd in kind kubectl helm docker jq; do
+          command -v $cmd >/dev/null || { echo "ERROR: $cmd is not installed"; exit 1; }
+        done
+        mem=$(docker info --format '{{`{{.MemTotal}}`}}')
+        gib=$((mem / 1024 / 1024 / 1024))
+        [ "$gib" -ge 20 ] || { echo "ERROR: Docker has ${gib}GiB; this demo needs 20GiB+ (three clusters, two serving stacks)"; exit 1; }
+        echo "Tools present. Docker memory: ${gib}GiB."
+
+  # ===========================================================================
+  # Clusters
+  # ===========================================================================
+  clusters:
+    desc: Create the control-plane and two workload kind clusters
+    deps: [check]
+    cmds:
+      - for: [kind-control.yaml, kind-eu.yaml, kind-us.yaml]
+        cmd: kind create cluster --config kubernetes/clusters/{{.ITEM}} --wait 90s
+      - kubectl config use-context kind-{{.CP}}
+      - kind get clusters
+
+  # ===========================================================================
+  # Workload clusters: MetalLB, fake DRA GPUs, pool label
+  # ===========================================================================
+  workloads:
+    desc: Prepare both workload clusters (MetalLB, dra-example-driver, pool label)
+    cmds:
+      - task: workload:prepare
+        vars: { CLUSTER: "{{.EU}}", POOL: gpu-eu-west, RANGE: "{{.PREFIX}}.255.100-{{.PREFIX}}.255.119" }
+      - task: workload:prepare
+        vars: { CLUSTER: "{{.US}}", POOL: gpu-us-east, RANGE: "{{.PREFIX}}.255.120-{{.PREFIX}}.255.139" }
+
+  workload:prepare:
+    internal: true
+    vars:
+      CTX: kind-{{.CLUSTER}}
+    cmds:
+      - |
+        [ -n "{{.PREFIX}}" ] || { echo "ERROR: could not detect the kind Docker subnet"; exit 1; }
+        echo "==> {{.CLUSTER}}: MetalLB {{.METALLB_VERSION}}, pool {{.RANGE}}"
+      - kubectl --context {{.CTX}} apply -f https://raw.githubusercontent.com/metallb/metallb/{{.METALLB_VERSION}}/config/manifests/metallb-native.yaml
+      - kubectl --context {{.CTX}} -n metallb-system rollout status deploy/controller --timeout=180s
+      - |
+        kubectl --context {{.CTX}} apply -f - <<POOL
+        apiVersion: metallb.io/v1beta1
+        kind: IPAddressPool
+        metadata: { name: kind-pool, namespace: metallb-system }
+        spec: { addresses: ["{{.RANGE}}"] }
+        ---
+        apiVersion: metallb.io/v1beta1
+        kind: L2Advertisement
+        metadata: { name: kind-l2, namespace: metallb-system }
+        spec: { ipAddressPools: [kind-pool] }
+        POOL
+      # without a DRA driver the engine's ResourceClaim stays Pending forever
+      - 'echo "==> {{.CLUSTER}}: dra-example-driver (fake GPUs)"'
+      - kubectl --context {{.CTX}} apply -f {{.UPSTREAM}}/e2e/dra-example-driver.yaml
+      - kubectl --context {{.CTX}} -n dra-example-driver rollout status ds/dra-example-driver-kubeletplugin --timeout=180s
+      # Modelplane does not label BYO clusters; without this, pods stay Pending.
+      - kubectl --context {{.CTX}} label node {{.CLUSTER}}-control-plane modelplane.ai/pool={{.POOL}} --overwrite
+      # The slice lands a moment after the DaemonSet reports rolled out.
+      - |
+        for _ in $(seq 1 30); do
+          [ "$(kubectl --context {{.CTX}} get resourceslices -o name 2>/dev/null | wc -l)" -gt 0 ] && break
+          sleep 2
+        done
+        kubectl --context {{.CTX}} get resourceslices -o custom-columns=NAME:.metadata.name,DRIVER:.spec.driver,NODE:.spec.nodeName
+
+  # ===========================================================================
+  # Control plane: Crossplane + the Modelplane Configuration
+  # ===========================================================================
+  controlplane:
+    desc: Install Crossplane and the Modelplane Configuration on the control plane
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
+      - helm repo update crossplane-stable
+      - >-
+        helm --kube-context {{.CTX}} upgrade --install crossplane crossplane-stable/crossplane
+        --version {{.CROSSPLANE_VERSION}}
+        --namespace crossplane-system --create-namespace
+        --set "args={--enable-dependency-version-upgrades}"
+        --set-json 'provider.defaultActivations=[]'
+        --wait
+      # before the Configuration: an ImageConfig binds at ProviderRevision creation, so ordering is the whole trick
+      - echo "==> Trimming the control plane to the BYO path"
+      - kubectl --context {{.CTX}} apply -f {{.UPSTREAM}}/e2e/lean-control-plane.yaml
+      - echo "==> Bootstrap RBAC"
+      - kubectl --context {{.CTX}} apply -f {{.UPSTREAM}}/docs/manifests/getting-started/prerequisites.yaml
+      - echo "==> Modelplane Configuration {{.MODELPLANE_VERSION}}"
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/configuration.yaml
+      - kubectl --context {{.CTX}} wait configuration/modelplane --for=condition=Healthy --timeout=10m
+      - kubectl --context {{.CTX}} get providers.pkg.crossplane.io
+
+  # ===========================================================================
+  # Register the fleet
+  # ===========================================================================
+  register:
+    desc: Register both workload clusters and publish capacity
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/00-namespaces.yaml
+      # --internal gives an address the control-plane provider pods can route to
+      - task: register:kubeconfig
+        vars: { CLUSTER: "{{.EU}}", SECRET: eu-west-kubeconfig }
+      - task: register:kubeconfig
+        vars: { CLUSTER: "{{.US}}", SECRET: us-east-kubeconfig }
+      - |
+        sed 's/172\.18\.255/{{.PREFIX}}.255/g' kubernetes/modelplane/10-inference-gateway.yaml |
+          kubectl --context {{.CTX}} apply -f -
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/20-inference-class.yaml
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/30-inference-clusters.yaml
+      - echo "==> Waiting for both InferenceClusters to install their serving stack (slow)"
+      - kubectl --context {{.CTX}} wait inferencecluster --all --for=condition=Ready --timeout=20m
+      - kubectl --context {{.CTX}} get inferenceclusters
+
+  register:kubeconfig:
+    internal: true
+    cmds:
+      - |
+        {
+          printf 'apiVersion: v1\nkind: Secret\nmetadata: {name: {{.SECRET}}, namespace: modelplane-system}\nstringData:\n  kubeconfig: |\n'
+          kind get kubeconfig --internal --name {{.CLUSTER}} | sed 's/^/    /'
+        } | kubectl --context kind-{{.CP}} apply -f -
+
+  # ===========================================================================
+  # The model
+  # ===========================================================================
+  deploy:
+    desc: Deploy the mock model across the fleet
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/40-model-deployment.yaml
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/50-model-service.yaml
+      - 'echo "==> Watch placement with: task placement"'
+
+  placement:
+    desc: Show where the fleet scheduler put each replica
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - echo "==> ModelDeployment:"
+      - kubectl --context {{.CTX}} -n {{.NS}} get modeldeployment -o wide
+      - echo ""
+      - echo "==> Replicas by cluster:"
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} get modelreplica
+        -o 'custom-columns=REPLICA:.metadata.name,CLUSTER:.spec.clusterName,READY:.status.conditions[?(@.type=="Ready")].status'
+      - echo ""
+      - echo "==> ReplicasScheduled:"
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} get modeldeployment mock-demo
+        -o jsonpath='{range .status.conditions[?(@.type=="ReplicasScheduled")]}{.status}{"  "}{.reason}{"  "}{.message}{"\n"}{end}'
+      - echo ""
+      - echo "==> ModelService address:"
+      - kubectl --context {{.CTX}} -n {{.NS}} get modelservice mock -o jsonpath='{.status.address}{"\n"}'
+
+  curl:
+    desc: Send a request through the single front door
+    vars:
+      CTX: kind-{{.CP}}
+      ADDR:
+        sh: kubectl --context kind-{{.CP}} -n {{.NS}} get modelservice mock -o jsonpath='{.status.address}' 2>/dev/null
+    cmds:
+      - |
+        [ -n "{{.ADDR}}" ] || { echo "ModelService has no address yet"; exit 1; }
+        echo "==> POST {{.ADDR}}/v1/chat/completions"
+      # the address is on the kind subnet, unroutable from the macOS host
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} run curl-$RANDOM --rm -i --restart=Never --quiet
+        --image=curlimages/curl@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13 --
+        curl -s "{{.ADDR}}/v1/chat/completions" -H 'content-type: application/json'
+        -d '{"model":"mock","messages":[{"role":"user","content":"hi"}]}'
+        | jq -r '.choices[0].message.content'
+
+  # ===========================================================================
+  # Drain: the fleet-level kubectl drain
+  # ===========================================================================
+  drain:
+    desc: 'Taint a cluster so its replicas move (task drain CLUSTER=gpu-eu-west)'
+    vars:
+      CTX: kind-{{.CP}}
+      CLUSTER: '{{.CLUSTER | default "gpu-eu-west"}}'
+    cmds:
+      - >-
+        kubectl --context {{.CTX}} patch inferencecluster {{.CLUSTER}} --type merge
+        -p '{"spec":{"taints":[{"key":"modelplane.ai/maintenance","effect":"NoExecute"}]}}'
+      - 'echo "Tainted {{.CLUSTER}} NoExecute. Watch with: task placement"'
+
+  undrain:
+    desc: 'Remove the taint (task undrain CLUSTER=gpu-eu-west)'
+    vars:
+      CTX: kind-{{.CP}}
+      CLUSTER: '{{.CLUSTER | default "gpu-eu-west"}}'
+    cmds:
+      - kubectl --context {{.CTX}} patch inferencecluster {{.CLUSTER}} --type merge -p '{"spec":{"taints":null}}'
+      - echo "Untainted {{.CLUSTER}}. Replicas that moved stay where they went."
+
+  # ===========================================================================
+  # Lifecycle
+  # ===========================================================================
+  up:
+    desc: Full setup, start to serving
+    cmds:
+      - task: clusters
+      - task: workloads
+      - task: controlplane
+      - task: register
+      - task: deploy
+
+  down:
+    desc: Delete all three kind clusters (run this yourself)
+    cmds:
+      - kind delete cluster --name {{.CP}}
+      - kind delete cluster --name {{.EU}}
+      - kind delete cluster --name {{.US}}

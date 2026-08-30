@@ -28,6 +28,7 @@ Companion code for [srekubecraft.io](https://srekubecraft.io/) blog posts. Each 
 | `kserve/` | [KServe - Production ML Serving on Kubernetes, from sklearn to LLMs](https://srekubecraft.io/posts/kserve/) | KServe Serverless mode + Knative + Istio + cert-manager + sklearn-iris (scale-to-zero) + Ollama LLM custom predictor (OpenAI-compatible chat API) |
 | `adk-agent/` | [Building a Read-Only Kubernetes Agent with Google ADK (Go)](https://srekubecraft.io/posts/kubernetes-agent-with-google-adk-go/) | Single-binary Go agent on Google ADK + Gemini, packaged as a scratch image, deployed via Helm with three secret modes (inline / existingSecret / ESO). Four-layer defense: prompt, kubectl verb whitelist, read-only RBAC, restricted PodSecurity. |
 | `llm-d/` | [llm-d - Kubernetes-Native Distributed LLM Inference at Scale](https://srekubecraft.io/posts/llm-d-distributed-inference/) | llm-d router (Endpoint Picker + Envoy) + Gateway API Inference Extension + `InferencePool` + 4x `llm-d-inference-sim` (GPU-free vLLM simulator). Inference-aware routing (prefix-cache / KV / queue scorers) via Flux on Kind. |
+| `modelplane-fleet/` | [Modelplane - Fleet Inference Across Clusters, Demoed Without a Single GPU](https://srekubecraft.io/posts/modelplane-fleet-inference/) | Modelplane v0.3.1 on Crossplane 2.4.0: one control plane + two BYO Kind "regions" with `dra-example-driver` fake GPUs and a mock engine. Fleet placement, single Traefik front door routing cross-cluster, `NoExecute` drain and shortfall. No GPU, no cloud. |
 
 ## Prerequisites
 

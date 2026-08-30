@@ -1,0 +1,5 @@
+# Developer-owned resources; modelplane-system comes from the upstream prerequisites.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-team
