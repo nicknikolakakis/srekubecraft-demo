@@ -1,0 +1,12 @@
+# Traffic drain: pin the service to one cluster. The taint in `task drain` moves replicas; this moves only traffic.
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelService
+metadata:
+  name: mock
+  namespace: ml-team
+spec:
+  endpoints:
+  - selector:
+      matchLabels:
+        modelplane.ai/deployment: mock-demo
+        modelplane.ai/cluster: gpu-us-east

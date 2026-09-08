@@ -1,0 +1,17 @@
+# Weighted split. Same name as 50-, so the address and `task curl` are unchanged; only the policy differs.
+# Weights are relative and apply to the entry as a whole, so scaling a deployment does not change its share.
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelService
+metadata:
+  name: mock
+  namespace: ml-team
+spec:
+  endpoints:
+  - weight: 90
+    selector:
+      matchLabels:
+        modelplane.ai/deployment: mock-demo
+  - weight: 10
+    selector:
+      matchLabels:
+        modelplane.ai/deployment: mock-demo-v2

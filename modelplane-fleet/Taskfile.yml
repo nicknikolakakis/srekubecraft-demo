@@ -179,9 +179,10 @@ tasks:
         -o 'custom-columns=REPLICA:.metadata.name,CLUSTER:.spec.clusterName,READY:.status.conditions[?(@.type=="Ready")].status'
       - echo ""
       - echo "==> ReplicasScheduled:"
+      # every deployment, not just mock-demo: the canary adds a second one
       - >-
-        kubectl --context {{.CTX}} -n {{.NS}} get modeldeployment mock-demo
-        -o jsonpath='{range .status.conditions[?(@.type=="ReplicasScheduled")]}{.status}{"  "}{.reason}{"  "}{.message}{"\n"}{end}'
+        kubectl --context {{.CTX}} -n {{.NS}} get modeldeployment
+        -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{range .status.conditions[?(@.type=="ReplicasScheduled")]}{.status}{"  "}{.reason}{"  "}{.message}{end}{"\n"}{end}'
       - echo ""
       - echo "==> ModelService address:"
       - kubectl --context {{.CTX}} -n {{.NS}} get modelservice mock -o jsonpath='{.status.address}{"\n"}'
@@ -203,6 +204,75 @@ tasks:
         curl -s "{{.ADDR}}/v1/chat/completions" -H 'content-type: application/json'
         -d '{"model":"mock","messages":[{"role":"user","content":"hi"}]}'
         | jq -r '.choices[0].message.content'
+
+  curl:split:
+    desc: 'Tally N requests by replica, to see a ModelService weight or cluster pin (task curl:split N=200)'
+    vars:
+      CTX: kind-{{.CP}}
+      N: '{{.N | default "200"}}'
+      ADDR:
+        sh: kubectl --context kind-{{.CP}} -n {{.NS}} get modelservice mock -o jsonpath='{.status.address}' 2>/dev/null
+    cmds:
+      - |
+        [ -n "{{.ADDR}}" ] || { echo "ModelService has no address yet"; exit 1; }
+        echo "==> {{.N}} requests through {{.ADDR}}"
+      # loop inside one pod; starting N pods would take longer than the test
+      - |
+        kubectl --context {{.CTX}} -n {{.NS}} run curl-split-$RANDOM --rm -i --restart=Never --quiet \
+          --image=curlimages/curl@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13 -- \
+          sh -c 'i=0; while [ $i -lt {{.N}} ]; do
+                   curl -s "{{.ADDR}}/v1/chat/completions" -H "content-type: application/json" \
+                     -d "{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+                   echo; i=$((i+1));
+                 done' \
+        | grep -o 'served by [a-z0-9-]*' | sed 's/served by //; s/-mock-.*//' \
+        | sort | uniq -c | sort -rn \
+        | awk -v t={{.N}} '{ printf "%-22s %5d  (%5.1f%%)\n", $2, $1, $1*100/t }
+                           END { printf "%-22s %5d\n", "total", t }'
+      - |
+        echo "==> replica -> cluster:"
+        kubectl --context {{.CTX}} -n {{.NS}} get modelreplica \
+          -o custom-columns=REPLICA:.metadata.name,CLUSTER:.spec.clusterName
+
+  # ===========================================================================
+  # Canary: the weighted ModelService
+  # ===========================================================================
+  canary:
+    desc: 'Deploy mock-demo-v2 and split traffic 90/10 (task canary)'
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      # two nodes in the fleet, one per region, and capacity is charged per node
+      - kubectl --context {{.CTX}} -n {{.NS}} scale modeldeployment mock-demo --replicas=1
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/41-model-deployment-v2.yaml
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/51-model-service-canary.yaml
+      - 'echo "==> Wait for both to be Ready, then: task curl:split N=200"'
+
+  canary:down:
+    desc: Remove the canary and restore the baseline deployment and service
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - kubectl --context {{.CTX}} delete -f kubernetes/modelplane/41-model-deployment-v2.yaml --ignore-not-found
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/50-model-service.yaml
+      - kubectl --context {{.CTX}} -n {{.NS}} scale modeldeployment mock-demo --replicas=2
+      - echo "Baseline restored."
+
+  traffic:drain:
+    desc: 'Pin traffic to gpu-us-east without moving a replica (contrast with task drain)'
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/52-model-service-drain.yaml
+      - 'echo "Traffic pinned to gpu-us-east. Replicas are untouched: task placement"'
+
+  traffic:undrain:
+    desc: Restore the unpinned service
+    vars:
+      CTX: kind-{{.CP}}
+    cmds:
+      - kubectl --context {{.CTX}} apply -f kubernetes/modelplane/50-model-service.yaml
+      - echo "Service unpinned."
 
   # ===========================================================================
   # Drain: the fleet-level kubectl drain
