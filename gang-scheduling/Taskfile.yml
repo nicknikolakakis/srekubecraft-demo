@@ -1,0 +1,185 @@
+version: "3"
+
+silent: true
+
+# One kind cluster, six fake GPUs, no hardware.
+
+vars:
+  CLUSTER: gang-demo
+  CTX: kind-gang-demo
+  NS: ml-team
+  W: kubernetes/workloads
+
+tasks:
+  check:
+    desc: Check tools and the kind node image
+    cmds:
+      - |
+        for cmd in kind kubectl docker python3; do
+          command -v $cmd >/dev/null || { echo "ERROR: $cmd is not installed"; exit 1; }
+        done
+        # no Workload API before 1.37
+        kind version | grep -qE 'v0\.(3[3-9]|[4-9][0-9])' || echo "WARN: kind v0.33.0+ ships the v1.37.0 node image"
+        echo "Tools present."
+
+  # Cluster
+  cluster:
+    desc: Create the kind cluster with the three feature gates
+    deps: [check]
+    cmds:
+      - kind create cluster --config kubernetes/cluster/kind.yaml --wait 120s
+      # missing here means every later step fails silently
+      - kubectl --context {{.CTX}} api-resources --api-group=scheduling.k8s.io
+
+  driver:
+    desc: Install dra-example-driver, two fake GPUs per node
+    cmds:
+      - kubectl --context {{.CTX}} apply -f kubernetes/cluster/dra-example-driver.yaml
+      - kubectl --context {{.CTX}} -n dra-example-driver rollout status ds/dra-example-driver-kubeletplugin --timeout=180s
+      - |
+        until [ "$(kubectl --context {{.CTX}} get resourceslices --no-headers 2>/dev/null | wc -l | tr -d ' ')" -ge 3 ]; do sleep 2; done
+        kubectl --context {{.CTX}} get resourceslices \
+          -o jsonpath='{range .items[*]}{.spec.nodeName}{": "}{range .spec.devices[*]}{.name}{" "}{end}{"\n"}{end}'
+
+  accel:
+    desc: Advertise example.com/accel as a node-local extended resource
+    cmds:
+      # node-local, so preemptible unlike DRA
+      - |
+        for n in $(kubectl --context {{.CTX}} get nodes -l '!node-role.kubernetes.io/control-plane' -o name | cut -d/ -f2); do
+          kubectl --context {{.CTX}} patch node "$n" --subresource=status --type=json \
+            -p '[{"op":"add","path":"/status/capacity/example.com~1accel","value":"2"}]' >/dev/null
+        done
+        kubectl --context {{.CTX}} get nodes -o custom-columns='NODE:.metadata.name,ACCEL:.status.allocatable.example\.com/accel'
+
+  base:
+    desc: Namespace, priority classes
+    cmds:
+      - kubectl --context {{.CTX}} apply -f {{.W}}/00-namespace.yaml -f {{.W}}/05-priorityclasses.yaml
+
+  up:
+    desc: Full setup
+    cmds:
+      - task: cluster
+      - task: driver
+      - task: accel
+      - task: base
+
+  # Act 1: the deadlock and the field that fixes it
+  deadlock:
+    desc: 'Two 4-rank jobs, six GPUs, no gang policy: both stall forever'
+    cmds:
+      - task: reset
+      - kubectl --context {{.CTX}} apply -f {{.W}}/10-no-gang.yaml
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get pods --no-headers 2>/dev/null | grep -c Running)" -ge 6 ]; do sleep 2; done
+      - task: status
+      - echo "==> Six GPUs held, neither job has its four ranks."
+
+  gang:
+    desc: 'Same two jobs with spec.scheduling.schedulingPolicy.gang.minCount: 4'
+    cmds:
+      - task: reset
+      - kubectl --context {{.CTX}} apply -f {{.W}}/10-no-gang.yaml
+      - kubectl --context {{.CTX}} -n {{.NS}} delete job train-a train-b --ignore-not-found
+      - kubectl --context {{.CTX}} apply -f {{.W}}/20-gang.yaml
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get podgroups --no-headers 2>/dev/null | wc -l | tr -d ' ')" -ge 2 ]; do sleep 2; done
+        sleep 5
+      - task: status
+      - echo "==> One job trains on four GPUs, two stay free for the next one."
+
+  # Act 2: preemption, and where it stops
+  dra-preempt:
+    desc: 'Add a priority-10000 gang on top of the DRA jobs: it never preempts'
+    cmds:
+      - kubectl --context {{.CTX}} apply -f {{.W}}/30-dra-preemption.yaml
+      - sleep 30
+      - task: status
+      - echo "==> Workload-aware preemption does not reclaim DRA devices yet (KEP-5710)."
+
+  preempt:
+    desc: 'Node-local accelerators: the urgent gang preempts, pod by pod (disruptionMode single)'
+    cmds:
+      - task: reset
+      - kubectl --context {{.CTX}} apply -f {{.W}}/40-accel-research.yaml
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get pods -l app.kubernetes.io/name=accel-research --no-headers 2>/dev/null | grep -c Running)" -ge 4 ]; do sleep 2; done
+      - kubectl --context {{.CTX}} apply -f {{.W}}/45-accel-urgent.yaml
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get pods -l app.kubernetes.io/name=accel-urgent --no-headers 2>/dev/null | grep -c Running)" -ge 4 ]; do sleep 3; done
+      - task: preempted
+      - 'echo "==> Default disruptionMode is single: the running gang is broken pod by pod."'
+
+  preempt:all:
+    desc: 'Same, with disruptionMode: all on the research gang'
+    cmds:
+      - task: reset
+      - kubectl --context {{.CTX}} apply -f {{.W}}/50-accel-research-disruption-all.yaml
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get pods -l app.kubernetes.io/name=accel-research --no-headers 2>/dev/null | grep -c Running)" -ge 4 ]; do sleep 2; done
+      - kubectl --context {{.CTX}} apply -f {{.W}}/45-accel-urgent.yaml
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get pods -l app.kubernetes.io/name=accel-urgent --no-headers 2>/dev/null | grep -c Running)" -ge 4 ]; do sleep 3; done
+      - task: preempted
+      - echo "==> All four ranks evicted as a unit."
+
+  # Observation
+  status:
+    desc: PodGroups and pods
+    cmds:
+      - echo "==> PodGroups:"
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} get podgroups
+        -o 'custom-columns=NAME:.metadata.name,MIN:.spec.schedulingPolicy.gang.minCount,PRIO:.spec.priority,DISRUPT:.spec.disruptionMode,STATUS:.status.conditions[0].reason'
+      - echo ""
+      - echo "==> Pods:"
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} get pods --no-headers
+        -o 'custom-columns=N:.metadata.labels.app\.kubernetes\.io/name,S:.status.phase'
+        | sort | uniq -c
+      - echo ""
+      - echo "==> Why a group is stuck:"
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} get podgroups
+        -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .status.conditions[*]}{.message}{end}{"\n"}{end}'
+
+  preempted:
+    desc: Which pods the scheduler evicted
+    cmds:
+      - echo "==> Preempted:"
+      - >-
+        kubectl --context {{.CTX}} -n {{.NS}} get events --field-selector reason=Preempted
+        --no-headers -o 'custom-columns=OBJ:.involvedObject.name,MSG:.message' || true
+      - echo ""
+      - task: status
+
+  metrics:
+    desc: The three PodGroup metrics the KEP added for beta
+    cmds:
+      # distroless image, so port-forward with the admin cert
+      - |
+        d=$(mktemp -d)
+        kubectl --context {{.CTX}} config view --raw --minify -o jsonpath='{.users[0].user.client-certificate-data}' | base64 -d > "$d/c.crt"
+        kubectl --context {{.CTX}} config view --raw --minify -o jsonpath='{.users[0].user.client-key-data}' | base64 -d > "$d/c.key"
+        pod=$(kubectl --context {{.CTX}} -n kube-system get pod -l component=kube-scheduler -o jsonpath='{.items[0].metadata.name}')
+        kubectl --context {{.CTX}} -n kube-system port-forward "pod/$pod" 10259:10259 >/dev/null 2>&1 &
+        pf=$!
+        sleep 4
+        curl -sk --cert "$d/c.crt" --key "$d/c.key" https://127.0.0.1:10259/metrics \
+          | grep -E '^scheduler_podgroup_(schedule_attempts_total|scheduling_attempt_duration_seconds_count|scheduling_algorithm_duration_seconds_count)'
+        kill $pf 2>/dev/null
+        rm -rf "$d"
+
+  reset:
+    desc: Remove every Job and PodGroup from the namespace
+    cmds:
+      - kubectl --context {{.CTX}} -n {{.NS}} delete job --all --ignore-not-found >/dev/null
+      - |
+        until [ "$(kubectl --context {{.CTX}} -n {{.NS}} get pods --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; do sleep 2; done
+      - kubectl --context {{.CTX}} -n {{.NS}} delete events --all >/dev/null 2>&1 || true
+
+  down:
+    desc: Delete the kind cluster (run this yourself)
+    cmds:
+      - kind delete cluster --name {{.CLUSTER}}

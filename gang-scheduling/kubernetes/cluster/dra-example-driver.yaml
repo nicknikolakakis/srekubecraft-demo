@@ -1,0 +1,309 @@
+# upstream chart v0.5.0 rendered with numDevices=2, see README
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dra-example-driver
+---
+# Source: dra-example-driver/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dra-example-driver-service-account
+  namespace: dra-example-driver
+  labels:
+    helm.sh/chart: dra-example-driver-0.0.0-dev
+    app.kubernetes.io/name: dra-example-driver
+    app.kubernetes.io/instance: dra-example-driver
+    app.kubernetes.io/version: "v0.5.0"
+    app.kubernetes.io/managed-by: Helm
+
+---
+# Source: dra-example-driver/templates/clusterrole.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dra-example-driver-role
+  namespace: dra-example-driver
+rules:
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims/status"]
+  verbs: ["update"]
+# Kubernetes 1.36+ enforces granular authorization for ResourceClaim status
+# writes via the DRAResourceClaimGranularStatusAuthorization feature gate. As a
+# node-local driver, we need the "associated-node" verbs on
+# "resourceclaims/driver" for our own driver name. This rule is inert on older
+# clusters that have not yet enabled the feature gate.
+# See https://github.com/kubernetes/kubernetes/issues/138149
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims/driver"]
+  verbs: ["associated-node:update", "associated-node:patch"]
+  resourceNames: ["gpu.example.com"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceslices"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# Source: dra-example-driver/templates/clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dra-example-driver-role-binding
+  namespace: dra-example-driver
+subjects:
+- kind: ServiceAccount
+  name: dra-example-driver-service-account
+  namespace: dra-example-driver
+roleRef:
+  kind: ClusterRole
+  name: dra-example-driver-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Source: dra-example-driver/templates/role.yaml
+# The kubelet plugin watches its OWN pod (by name, in this namespace) to pick up
+# health.example.com/<device> annotation overrides used by the device-health
+# reporting demo (KEP-4680). That only requires watching pods in the release
+# namespace, so it is a namespaced Role rather than a cluster-wide grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dra-example-driver-pods-role
+  namespace: dra-example-driver
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["watch"]
+
+---
+# Source: dra-example-driver/templates/rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dra-example-driver-pods-role-binding
+  namespace: dra-example-driver
+subjects:
+- kind: ServiceAccount
+  name: dra-example-driver-service-account
+  namespace: dra-example-driver
+roleRef:
+  kind: Role
+  name: dra-example-driver-pods-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Source: dra-example-driver/templates/kubeletplugin-metrics-svc.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dra-example-driver-kubeletplugin-metrics
+  namespace: dra-example-driver
+  labels:
+    helm.sh/chart: dra-example-driver-0.0.0-dev
+    app.kubernetes.io/name: dra-example-driver
+    app.kubernetes.io/instance: dra-example-driver
+    app.kubernetes.io/version: "v0.5.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kubeletplugin
+spec:
+  selector:
+    app.kubernetes.io/name: dra-example-driver
+    app.kubernetes.io/instance: dra-example-driver
+    app.kubernetes.io/component: kubeletplugin
+  ports:
+  - name: metrics
+    protocol: TCP
+    port: 8080
+    targetPort: metrics
+
+---
+# Source: dra-example-driver/templates/kubeletplugin.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dra-example-driver-kubeletplugin
+  namespace: dra-example-driver
+  labels:
+    helm.sh/chart: dra-example-driver-0.0.0-dev
+    app.kubernetes.io/name: dra-example-driver
+    app.kubernetes.io/instance: dra-example-driver
+    app.kubernetes.io/version: "v0.5.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kubeletplugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dra-example-driver
+      app.kubernetes.io/instance: dra-example-driver
+      app.kubernetes.io/component: kubeletplugin
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dra-example-driver
+        app.kubernetes.io/instance: dra-example-driver
+        app.kubernetes.io/component: kubeletplugin
+    spec:
+      priorityClassName: system-node-critical
+      serviceAccountName: dra-example-driver-service-account
+      securityContext:
+        {}
+      containers:
+      - name: plugin
+        securityContext:
+          privileged: true
+        image: registry.k8s.io/dra-example-driver/dra-example-driver:v0.5.0
+        imagePullPolicy: IfNotPresent
+        command: ["dra-example-kubeletplugin"]
+        resources:
+          {}
+        
+        livenessProbe:
+          grpc:
+            port: 51515
+            service: liveness
+          failureThreshold: 3
+          periodSeconds: 10
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: DRIVER_NAME
+          value: "gpu.example.com"
+        - name: DEVICE_PROFILE
+          value: "gpu"
+        - name: CDI_ROOT
+          value: /var/run/cdi
+        - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+          value: "/var/lib/kubelet/plugins_registry"
+        - name: KUBELET_PLUGINS_DIRECTORY_PATH
+          value: "/var/lib/kubelet/plugins"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: DEVICE_HEALTH
+          value: "true"
+        - name: SIMULATE_HEALTH_CHANGES
+          value: "false"
+        # Simulated number of devices the example driver will pretend to have.
+        - name: NUM_DEVICES
+          value: "2"
+        - name: GPU_DEVICE_STATUS
+          value: "false"
+        - name: GPU_ALLOW_MULTIPLE_ALLOCATIONS
+          value: "false"
+        - name: GPU_PUBLISH_PCIE_ROOT
+          value: "false"
+        - name: NET_PUBLISH_PCIE_ROOT
+          value: "false"
+        - name: PCIE_ROOTS
+          value: ""
+        - name: HEALTHCHECK_PORT
+          value: "51515"
+        - name: METRICS_PORT
+          value: "8080"
+        - name: GPU_PARTITIONS
+          value: "0"
+        - name: CPU_NUMA_NODES
+          value: "8"
+        - name: CPUS_PER_NUMA_NODE
+          value: "4"
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: BINDING_CONDITIONS
+          value: "false"
+        volumeMounts:
+        - name: plugins-registry
+          mountPath: "/var/lib/kubelet/plugins_registry"
+        - name: plugins
+          mountPath: "/var/lib/kubelet/plugins"
+        - name: cdi
+          mountPath: /var/run/cdi
+      volumes:
+      - name: plugins-registry
+        hostPath:
+          path: "/var/lib/kubelet/plugins_registry"
+      - name: plugins
+        hostPath:
+          path: "/var/lib/kubelet/plugins"
+      - name: cdi
+        hostPath:
+          path: /var/run/cdi
+
+---
+# Source: dra-example-driver/templates/deviceclass.yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.example.com
+spec:
+  selectors:
+  - cel:
+      expression: "device.driver == 'gpu.example.com'"
+
+---
+# Source: dra-example-driver/templates/validatingadmissionpolicy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: resourceslices-policy-dra-example-driver
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:   ["resource.k8s.io"]
+      apiVersions: ["v1beta1", "v1beta2", "v1"]
+      operations:  ["CREATE", "UPDATE", "DELETE"]
+      resources:   ["resourceslices"]
+  matchConditions:
+  - name: isRestrictedUser
+    expression: >-
+      request.userInfo.username == "system:serviceaccount:dra-example-driver:dra-example-driver-service-account"
+  variables:
+  - name: userNodeName
+    expression: >-
+      request.userInfo.extra[?'authentication.kubernetes.io/node-name'][0].orValue('')
+  - name: objectNodeName
+    expression: >-
+      (request.operation == "DELETE" ? oldObject : object).spec.?nodeName.orValue("")
+  validations:
+  - expression: variables.userNodeName != ""
+    message: >-
+      no node association found for user, this user must run in a pod on a node and ServiceAccountTokenPodNodeInfo must be enabled
+  - expression: variables.userNodeName == variables.objectNodeName
+    messageExpression: >-
+      "this user running on node '"+variables.userNodeName+"' may not modify " +
+      (variables.objectNodeName == "" ?"cluster resourceslices" : "resourceslices on node '"+variables.objectNodeName+"'")
+
+---
+# Source: dra-example-driver/templates/validatingadmissionpolicybinding.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: resourceslices-policy-dra-example-driver
+spec:
+  policyName: resourceslices-policy-dra-example-driver
+  validationActions: [Deny]
+  # All ResourceSlices are matched.

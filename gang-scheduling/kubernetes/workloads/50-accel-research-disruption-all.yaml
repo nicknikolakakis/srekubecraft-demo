@@ -1,0 +1,39 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: accel-research
+  namespace: ml-team
+  labels:
+    app.kubernetes.io/name: accel-research
+spec:
+  completions: 4
+  parallelism: 4
+  backoffLimit: 0
+  completionMode: Indexed
+  scheduling:
+    schedulingPolicy:
+      gang:
+        minCount: 4
+    disruptionMode:
+      all: {}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: accel-research
+    spec:
+      restartPolicy: Never
+      priorityClassName: research
+      containers:
+        - name: rank
+          image: registry.k8s.io/e2e-test-images/busybox@sha256:0ffbe172f8d245c83f285c6992b452c53d085661e03ddfd3b484332026e6c8bb
+          command: ["sh", "-c", "echo rank $JOB_COMPLETION_INDEX holding an accelerator; sleep 3600"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+              example.com/accel: "1"
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              example.com/accel: "1"

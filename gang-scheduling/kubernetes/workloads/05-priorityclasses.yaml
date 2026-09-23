@@ -1,0 +1,16 @@
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: research
+value: 100
+globalDefault: false
+description: "Batch research training, preemptible"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: production-train
+value: 10000
+globalDefault: false
+description: "Production training, preempts research"

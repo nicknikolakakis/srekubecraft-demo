@@ -1,0 +1,40 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-urgent
+  namespace: ml-team
+  labels:
+    app.kubernetes.io/name: train-urgent
+spec:
+  completions: 4
+  parallelism: 4
+  backoffLimit: 0
+  completionMode: Indexed
+  scheduling:
+    schedulingPolicy:
+      gang:
+        minCount: 4
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: train-urgent
+    spec:
+      restartPolicy: Never
+      priorityClassName: production-train
+      resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: one-gpu
+      containers:
+        - name: rank
+          image: registry.k8s.io/e2e-test-images/busybox@sha256:0ffbe172f8d245c83f285c6992b452c53d085661e03ddfd3b484332026e6c8bb
+          command: ["sh", "-c", "echo rank $JOB_COMPLETION_INDEX holding a GPU; sleep 3600"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            claims:
+              - name: gpu

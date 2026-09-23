@@ -1,0 +1,24 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: gang-demo
+
+featureGates:
+  # API + gang + workload-aware preemption
+  GenericWorkload: true
+  # without it spec.scheduling is pruned silently
+  WorkloadWithJob: true
+  # shared claims per PodGroup
+  DRAWorkloadResourceClaims: true
+
+runtimeConfig:
+  "scheduling.k8s.io/v1beta1": "true"
+
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.37.0
+  - role: worker
+    image: kindest/node:v1.37.0
+  - role: worker
+    image: kindest/node:v1.37.0
+  - role: worker
+    image: kindest/node:v1.37.0
