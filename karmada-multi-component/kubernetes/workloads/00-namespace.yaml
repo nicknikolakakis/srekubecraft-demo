@@ -1,0 +1,5 @@
+# Created on the Karmada API server, Karmada syncs it to every member.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-team

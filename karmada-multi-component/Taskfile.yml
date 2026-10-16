@@ -1,0 +1,247 @@
+version: "3"
+
+silent: true
+
+# Karmada v1.19 host + three member kind clusters, fake GPUs, no hardware.
+
+vars:
+  KARMADA_VERSION: v1.19.0
+  KARMADACTL_SHA256: f987edc33597f6266edb70ee0626dfce4ff050123c463955c7222cef0b874624
+  TRAINER_VERSION: v1.9.4
+  MEMBERS: member-a member-b member-c
+  HOST_CTX: kind-karmada-host
+  KARMADA_DIR: "{{.ROOT_DIR}}/.karmada"
+  KCTL: "{{.ROOT_DIR}}/bin/karmadactl"
+  KK: kubectl --kubeconfig {{.ROOT_DIR}}/.karmada/karmada-apiserver.config
+  NS: ml-team
+  W: kubernetes/workloads
+
+tasks:
+  check:
+    desc: Check tools
+    cmds:
+      - |
+        for cmd in kind kubectl docker curl shasum jq; do
+          command -v $cmd >/dev/null || { echo "ERROR: $cmd is not installed"; exit 1; }
+        done
+        echo "Tools present."
+
+  karmadactl:
+    desc: Download karmadactl {{.KARMADA_VERSION}} into ./bin and verify its checksum
+    cmds:
+      - mkdir -p bin
+      - curl -fsSLo bin/karmadactl.tgz https://github.com/karmada-io/karmada/releases/download/{{.KARMADA_VERSION}}/karmadactl-darwin-arm64.tgz
+      - echo "{{.KARMADACTL_SHA256}}  bin/karmadactl.tgz" | shasum -a 256 -c -
+      - tar -xzf bin/karmadactl.tgz -C bin karmadactl && rm bin/karmadactl.tgz
+      - '{{.KCTL}} version'
+    status:
+      - test -x {{.KCTL}}
+
+  # Clusters
+  clusters:
+    desc: Create the host and the three member clusters
+    deps: [check]
+    cmds:
+      - |
+        for c in karmada-host {{.MEMBERS}}; do
+          kind get clusters | grep -qx $c || kind create cluster --config kubernetes/clusters/$c.yaml --wait 120s
+        done
+    status:
+      - for c in karmada-host {{.MEMBERS}}; do kind get clusters | grep -qx $c || exit 1; done
+
+  gpus:
+    desc: 'Advertise fake nvidia.com/gpu: a=1x2, b=3x2, c=1x8'
+    cmds:
+      # schedulable nodes only, the extended resource is all the scheduler checks
+      - |
+        patch() {
+          kubectl --context kind-$1 patch node "$2" --subresource=status --type=json \
+            -p "[{\"op\":\"add\",\"path\":\"/status/capacity/nvidia.com~1gpu\",\"value\":\"$3\"}]" >/dev/null
+        }
+        patch member-a member-a-control-plane 2
+        for n in member-b-worker member-b-worker2 member-b-worker3; do patch member-b $n 2; done
+        patch member-c member-c-control-plane 8
+      # kubelet copies capacity to allocatable on its next status sync
+      - until [ "$(kubectl --context kind-member-c get node member-c-control-plane -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')" = "8" ]; do sleep 2; done
+      - |
+        for c in {{.MEMBERS}}; do
+          kubectl --context kind-$c get nodes -o custom-columns="NODE:.metadata.labels.kubernetes\.io/hostname,GPU:.status.allocatable.nvidia\.com/gpu"
+        done
+
+  # Karmada
+  karmada:
+    desc: karmadactl init on the host cluster, feature gate off
+    deps: [karmadactl]
+    cmds:
+      - >-
+        {{.KCTL}} init --context {{.HOST_CTX}}
+        --karmada-data {{.KARMADA_DIR}} --karmada-pki {{.KARMADA_DIR}}/pki
+        --karmada-apiserver-advertise-address 127.0.0.1
+        --crds https://github.com/karmada-io/karmada/releases/download/{{.KARMADA_VERSION}}/crds.tar.gz
+      - '{{.KK}} api-resources --api-group=policy.karmada.io'
+    status:
+      # a failed init leaves the kubeconfig behind, so probe the API instead
+      - '{{.KK}} get --raw /readyz >/dev/null 2>&1'
+
+  join:
+    desc: Join the members in push mode, then point Karmada at their in-network endpoints
+    cmds:
+      - |
+        for c in {{.MEMBERS}}; do
+          {{.KCTL}} join $c --kubeconfig {{.KARMADA_DIR}}/karmada-apiserver.config \
+            --cluster-kubeconfig $HOME/.kube/config --cluster-context kind-$c
+          # join records the kubeconfig server, 127.0.0.1 on macOS, unreachable from the host cluster
+          {{.KK}} patch cluster $c --type merge -p "{\"spec\":{\"apiEndpoint\":\"https://$c-control-plane:6443\"}}"
+        done
+      - '{{.KK}} wait --for=condition=Ready cluster --all --timeout=120s'
+      - '{{.KK}} get clusters'
+
+  trainer:
+    desc: Training operator {{.TRAINER_VERSION}} on members, PyTorchJob CRD on the Karmada API server
+    cmds:
+      - |
+        for c in {{.MEMBERS}}; do
+          kubectl --context kind-$c apply --server-side -k "github.com/kubeflow/trainer.git/manifests/overlays/standalone?ref={{.TRAINER_VERSION}}" >/dev/null
+        done
+      - '{{.KK}} apply --server-side -f https://raw.githubusercontent.com/kubeflow/trainer/{{.TRAINER_VERSION}}/manifests/base/crds/kubeflow.org_pytorchjobs.yaml'
+      - |
+        for c in {{.MEMBERS}}; do
+          kubectl --context kind-$c -n kubeflow rollout status deploy/training-operator --timeout=180s
+        done
+
+  up:
+    desc: Full setup, feature gate off
+    cmds:
+      - task: clusters
+      - task: gpus
+      - task: karmada
+      - task: join
+      - task: trainer
+      - '{{.KK}} apply -f {{.W}}/00-namespace.yaml'
+
+  gate:on:
+    desc: Enable MultiplePodTemplatesScheduling on scheduler, controller-manager and webhook
+    cmds:
+      # controller-manager fills spec.components, scheduler reads it, webhook validates it
+      - for: [karmada-scheduler, karmada-controller-manager, karmada-webhook]
+        task: gates
+        vars: {DEPLOY: "{{.ITEM}}", GATES: MultiplePodTemplatesScheduling=true}
+
+  modeling:off:
+    desc: Turn off CustomizedClusterResourceModeling on the scheduler, its default models have no GPU
+    cmds:
+      - task: gates
+        vars: {DEPLOY: karmada-scheduler, GATES: "MultiplePodTemplatesScheduling=true,CustomizedClusterResourceModeling=false"}
+
+  gates:
+    internal: true
+    requires:
+      vars: [DEPLOY, GATES]
+    cmds:
+      # init sets required anti-affinity and maxUnavailable 0, a rolling update deadlocks on one node
+      - |
+        kubectl --context {{.HOST_CTX}} -n karmada-system get deploy {{.DEPLOY}} -o json \
+          | jq '.spec.strategy = {"type":"Recreate"}
+                | .spec.template.spec.containers[0].command |= (map(select(startswith("--feature-gates") | not)) + ["--feature-gates={{.GATES}}"])' \
+          | kubectl --context {{.HOST_CTX}} apply -f - >/dev/null
+      - kubectl --context {{.HOST_CTX}} -n karmada-system rollout status deploy/{{.DEPLOY}} --timeout=120s
+
+  estimator:
+    desc: Accurate scheduler-estimator per member, it sees nodes instead of cluster totals
+    cmds:
+      # enable validates from the laptop, the pod needs the in-network endpoint, so swap the secret after
+      - |
+        for c in {{.MEMBERS}}; do
+          {{.KCTL}} addons enable karmada-scheduler-estimator -C $c \
+            --member-kubeconfig $HOME/.kube/config --member-context kind-$c \
+            --karmada-kubeconfig {{.KARMADA_DIR}}/karmada-apiserver.config --context {{.HOST_CTX}} --pod-timeout 30
+          kind get kubeconfig --internal --name $c > {{.KARMADA_DIR}}/$c-internal.config
+          kubectl --context {{.HOST_CTX}} -n karmada-system create secret generic $c-kubeconfig \
+            --from-file=$c-kubeconfig={{.KARMADA_DIR}}/$c-internal.config --dry-run=client -o yaml \
+            | kubectl --context {{.HOST_CTX}} apply --server-side --force-conflicts -f - >/dev/null
+          kubectl --context {{.HOST_CTX}} -n karmada-system rollout restart deploy/karmada-scheduler-estimator-$c >/dev/null
+        done
+      - for c in {{.MEMBERS}}; do kubectl --context {{.HOST_CTX}} -n karmada-system rollout status deploy/karmada-scheduler-estimator-$c --timeout=120s; done
+
+  # Act 1: gate off, the job is a non-workload
+  copies:
+    desc: 'Gate off, Divided/Aggregated policy: one full job per member'
+    cmds:
+      - task: run
+        vars: {POLICY: 10-policy-aggregated, JOB: 30-train-small}
+
+  # Act 2: gate on, still copies without a spread constraint
+  copies:gated:
+    desc: 'Gate on, same policy: components parsed, job still copied to every member'
+    cmds:
+      - task: run
+        vars: {POLICY: 10-policy-aggregated, JOB: 30-train-small}
+
+  # Act 3 and 4: one cluster
+  one:
+    desc: 'Gate on, spreadConstraints maxGroups 1: fails with default resource models, one member without'
+    cmds:
+      - task: run
+        vars: {POLICY: 20-policy-one-cluster, JOB: 30-train-small}
+
+  # Act 5 and 6: aggregate GPUs lie
+  fragment:
+    desc: 'train-big, 2 workers x 3 GPUs: the general estimator only sees cluster totals'
+    cmds:
+      - task: run
+        vars: {POLICY: 20-policy-one-cluster, JOB: 40-train-big}
+
+  run:
+    internal: true
+    requires:
+      vars: [POLICY, JOB]
+    cmds:
+      - task: reset
+      - '{{.KK}} apply -f {{.W}}/{{.POLICY}}.yaml -f {{.W}}/{{.JOB}}.yaml'
+      - task: settle
+      - task: status
+
+  # Observation
+  settle:
+    internal: true
+    cmds:
+      # a failed schedule leaves spec.clusters empty, so wait on the condition instead
+      - until {{.KK}} -n {{.NS}} get rb -o jsonpath='{.items[*].status.conditions[?(@.type=="Scheduled")].status}' 2>/dev/null | grep -qE 'True|False'; do sleep 2; done
+      - sleep 10
+
+  status:
+    desc: ResourceBinding result and pods per member
+    cmds:
+      - echo "==> ResourceBinding:"
+      - >-
+        {{.KK}} -n {{.NS}} get rb
+        -o 'custom-columns=NAME:.metadata.name,REPLICAS:.spec.replicas,COMPONENTS:.spec.components[*].name,CLUSTERS:.spec.clusters[*].name,PER-CLUSTER:.spec.clusters[*].components'
+      - echo ""
+      - echo "==> Scheduled:"
+      - >-
+        {{.KK}} -n {{.NS}} get rb
+        -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Scheduled")].status}{" "}{.status.conditions[?(@.type=="Scheduled")].message}{"\n"}{end}'
+      - echo ""
+      - echo "==> Pods per member:"
+      - |
+        for c in {{.MEMBERS}}; do
+          kubectl --context kind-$c -n {{.NS}} get pods --no-headers -o 'custom-columns=POD:.metadata.name,PHASE:.status.phase,NODE:.spec.nodeName' 2>/dev/null \
+            | sed "s/^/$c  /"
+        done
+
+  reset:
+    desc: Remove every PyTorchJob and policy from the Karmada API server
+    cmds:
+      - '{{.KK}} -n {{.NS}} delete pytorchjob --all --ignore-not-found >/dev/null'
+      - '{{.KK}} -n {{.NS}} delete propagationpolicy --all --ignore-not-found >/dev/null'
+      - |
+        for c in {{.MEMBERS}}; do
+          until [ "$(kubectl --context kind-$c -n {{.NS}} get pods --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; do sleep 2; done
+        done
+      - '{{.KK}} -n {{.NS}} delete events --all >/dev/null 2>&1 || true'
+
+  down:
+    desc: Delete all four kind clusters (run this yourself)
+    cmds:
+      - for c in karmada-host {{.MEMBERS}}; do kind delete cluster --name $c; done
+      - rm -rf {{.KARMADA_DIR}}

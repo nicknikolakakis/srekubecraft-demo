@@ -1,0 +1,20 @@
+# Same policy plus the constraint that actually makes it one cluster.
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: training
+  namespace: ml-team
+spec:
+  resourceSelectors:
+    - apiVersion: kubeflow.org/v1
+      kind: PyTorchJob
+  placement:
+    clusterAffinity:
+      clusterNames: [member-a, member-b, member-c]
+    spreadConstraints:
+      - spreadByField: cluster
+        minGroups: 1
+        maxGroups: 1
+    replicaScheduling:
+      replicaSchedulingType: Divided
+      replicaDivisionPreference: Aggregated

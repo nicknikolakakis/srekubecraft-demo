@@ -1,0 +1,30 @@
+# CPU master + two 1-GPU workers: fits in every member.
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: train-small
+  namespace: ml-team
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        spec:
+          containers:
+            - name: pytorch
+              image: registry.k8s.io/pause:3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
+              resources:
+                requests: {cpu: 50m, memory: 32Mi}
+                limits: {cpu: 100m, memory: 64Mi}
+    Worker:
+      replicas: 2
+      restartPolicy: OnFailure
+      template:
+        spec:
+          containers:
+            - name: pytorch
+              image: registry.k8s.io/pause:3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
+              resources:
+                requests: {cpu: 50m, memory: 32Mi, nvidia.com/gpu: "1"}
+                limits: {cpu: 100m, memory: 64Mi, nvidia.com/gpu: "1"}

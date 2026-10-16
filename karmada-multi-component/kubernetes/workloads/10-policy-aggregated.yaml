@@ -1,0 +1,16 @@
+# What most people write for a training job: divide replicas, pack them into as few clusters as possible.
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: training
+  namespace: ml-team
+spec:
+  resourceSelectors:
+    - apiVersion: kubeflow.org/v1
+      kind: PyTorchJob
+  placement:
+    clusterAffinity:
+      clusterNames: [member-a, member-b, member-c]
+    replicaScheduling:
+      replicaSchedulingType: Divided
+      replicaDivisionPreference: Aggregated
