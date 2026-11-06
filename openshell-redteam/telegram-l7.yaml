@@ -1,0 +1,29 @@
+id: telegram-l7
+display_name: Telegram Bot API (L7 chat_id pinned)
+description: redteam experiment, sendMessage allowed only to the pinned chat_id 123456
+category: messaging
+inference_capable: false
+credentials:
+  - name: bot_token
+    description: Telegram bot token from BotFather
+    env_vars: [TELEGRAM_BOT_TOKEN]
+    required: true
+    auth_style: path
+    path_template: /bot{credential}/getUpdates
+discovery:
+  credentials: [bot_token]
+endpoints:
+  - host: api.telegram.org
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow:
+          method: GET
+          path: /bot*/getUpdates
+      - allow:
+          method: GET
+          path: /bot*/sendMessage
+          query:
+            chat_id: "123456"
+binaries: [/usr/bin/python3.13]

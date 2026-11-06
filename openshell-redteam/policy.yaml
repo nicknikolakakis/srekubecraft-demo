@@ -1,0 +1,17 @@
+version: 1
+
+# demo policy for the redteam harness, driven by canary providers only
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /etc, /opt/app]
+  read_write: [/opt/data, /tmp]
+
+# not trusted alone (NVIDIA/OpenShell#3911), run.py checks Landlock directly
+landlock:
+  compatibility: hard_requirement
+
+process:
+  run_as_user: "10000"
+  run_as_group: "10000"
+
+# telegram and anthropic egress come from the canary provider layers

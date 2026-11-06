@@ -1,0 +1,65 @@
+version: "3"
+
+vars:
+  IMAGE: openshell-redteam:demo
+  SANDBOX: redteam
+
+tasks:
+  image:
+    desc: Build the minimal demo image
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
+  providers:
+    desc: Create canary telegram/anthropic providers (fake tokens, never real)
+    cmds:
+      - openshell provider delete redteam-telegram 2>/dev/null || true
+      - openshell provider delete redteam-anthropic 2>/dev/null || true
+      - TELEGRAM_BOT_TOKEN=CANARY-7f3a openshell provider create --name redteam-telegram --type telegram --credential TELEGRAM_BOT_TOKEN
+      - ANTHROPIC_TOKEN=CANARY-7f3a openshell provider create --name redteam-anthropic --type anthropic --credential ANTHROPIC_TOKEN
+
+  sandbox:
+    desc: Create the throwaway demo sandbox (canary providers, scratch mount only)
+    deps: [image, providers]
+    cmds:
+      - mkdir -p "{{.TASKFILE_DIR}}/sandbox-data"
+      - openshell sandbox delete {{.SANDBOX}} 2>/dev/null || true
+      - |
+        MOUNTS=$(jq -nc --arg data "{{.TASKFILE_DIR}}/sandbox-data" \
+          '{docker:{mounts:[{type:"bind",source:$data,target:"/opt/data",read_only:false}]}}')
+        openshell sandbox create --name {{.SANDBOX}} --from {{.IMAGE}} --policy ./policy.yaml \
+          --provider redteam-telegram --provider redteam-anthropic \
+          --driver-config-json "$MOUNTS" --cpu 1 --memory 2Gi \
+          --detach --restart-policy never -- tail -f /dev/null
+
+  run:
+    desc: Run the exfiltration/escape matrix against the baseline sandbox, write results.json
+    deps: [sandbox]
+    cmds:
+      - python3 run.py
+
+  run-l7:
+    desc: Recreate with the L7 chat_id-pinned telegram provider and re-run, write results-mitigated.json
+    deps: [image]
+    cmds:
+      - mkdir -p "{{.TASKFILE_DIR}}/sandbox-data"
+      - openshell provider profile import -f telegram-l7.yaml
+      - openshell provider delete redteam-telegram-l7 2>/dev/null || true
+      - TELEGRAM_BOT_TOKEN=CANARY-7f3a openshell provider create --name redteam-telegram-l7 --type telegram-l7 --credential TELEGRAM_BOT_TOKEN
+      - openshell sandbox delete {{.SANDBOX}} 2>/dev/null || true
+      - |
+        MOUNTS=$(jq -nc --arg data "{{.TASKFILE_DIR}}/sandbox-data" \
+          '{docker:{mounts:[{type:"bind",source:$data,target:"/opt/data",read_only:false}]}}')
+        openshell sandbox create --name {{.SANDBOX}} --from {{.IMAGE}} --policy ./policy.yaml \
+          --provider redteam-telegram-l7 --provider redteam-anthropic \
+          --driver-config-json "$MOUNTS" --cpu 1 --memory 2Gi \
+          --detach --restart-policy never -- tail -f /dev/null
+      - python3 run.py results-mitigated.json
+
+  clean:
+    desc: Delete the demo sandbox and canary providers
+    cmds:
+      - openshell sandbox delete {{.SANDBOX}} 2>/dev/null || true
+      - openshell provider delete redteam-telegram 2>/dev/null || true
+      - openshell provider delete redteam-anthropic 2>/dev/null || true
+      - openshell provider delete redteam-telegram-l7 2>/dev/null || true
