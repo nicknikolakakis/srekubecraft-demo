@@ -1,0 +1,50 @@
+# delivery-only pods: no runtime, so they finish fast and hold no memory
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __NAME__
+  namespace: models
+  labels:
+    demo/bench: delivery
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    demo/role: model
+  containers:
+    - name: probe
+      image: curlimages/curl:8.17.0
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          if [ -n "$BASE_URL" ]; then
+            t=0
+            for f in $FILES; do
+              # -L: the Hub answers with a redirect to its CDN
+              s=$(curl -fsSL -o "/models/$f" -w '%{time_total}' "$BASE_URL/$f")
+              t=$(awk -v a="$t" -v b="$s" 'BEGIN{print a+b}')
+            done
+            du -sh /models
+            echo "download_seconds=$t"
+            # free the node disk, the pod stays for its logs
+            rm -f /models/*
+          else
+            ls -l /models/models/model.safetensors
+          fi
+      env:
+        - name: BASE_URL
+          value: "__URL__"
+        - name: FILES
+          value: config.json generation_config.json merges.txt model.safetensors tokenizer.json tokenizer_config.json vocab.json
+      resources:
+        requests:
+          cpu: 500m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+      volumeMounts:
+        - name: weights
+          mountPath: /models
+  volumes:
+    - name: weights
+      __VOLUME__

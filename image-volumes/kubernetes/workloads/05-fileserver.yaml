@@ -1,0 +1,51 @@
+# in-cluster HTTP mirror of the same weights, the LAN baseline for downloads
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fileserver
+  namespace: models
+  labels:
+    app.kubernetes.io/name: fileserver
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: imgvol-demo-control-plane
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+  containers:
+    - name: nginx
+      image: nginx:1.29.3-alpine
+      ports:
+        - containerPort: 80
+      readinessProbe:
+        httpGet:
+          path: /config.json
+          port: 80
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+      volumeMounts:
+        - name: weights
+          mountPath: /usr/share/nginx/html
+          subPath: models
+          readOnly: true
+  volumes:
+    - name: weights
+      image:
+        reference: localhost:5001/weights/qwen2.5-0.5b:v1
+        pullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fileserver
+  namespace: models
+spec:
+  selector:
+    app.kubernetes.io/name: fileserver
+  ports:
+    - port: 80
+      targetPort: 80

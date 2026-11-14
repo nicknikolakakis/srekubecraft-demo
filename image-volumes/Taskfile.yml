@@ -1,0 +1,113 @@
+version: "3"
+
+silent: true
+
+# One kind cluster, one local registry, one model shipped three ways.
+
+vars:
+  CLUSTER: imgvol-demo
+  CTX: kind-imgvol-demo
+  NS: models
+  REG_NAME: kind-registry
+  REG_PORT: "5001"
+  REGISTRY: localhost:5001
+  # SIZE=1.5b for the bigger model, revisions pinned per size
+  SIZE: 0.5b
+  MODEL_REV: '{{if eq .SIZE "1.5b"}}989aa7980e4cf806f80c7fef2b1adb7bc71aa306{{else}}7ae557604adf67be50417f59c2c2f167def9a775{{end}}'
+  MODEL: Qwen/Qwen2.5-{{.SIZE | upper}}-Instruct
+  MODEL_DIR: models/qwen2.5-{{.SIZE}}-instruct
+  WEIGHTS_IMAGE: "{{.REGISTRY}}/weights/qwen2.5-{{.SIZE}}:v1"
+  MODEL_FILES: config.json generation_config.json merges.txt model.safetensors tokenizer.json tokenizer_config.json vocab.json LICENSE
+  # v0.32.0 CPU crashes on the first request, fixed in v0.33.0 (vllm#61992)
+  VLLM_IMAGE: vllm/vllm-openai-cpu:v0.33.0@sha256:06e9c5ee1c04c9629bf5ce570f2995338ac02a704d9db6f68adc909855111fe1
+  REGISTRY_IMAGE: registry:3@sha256:f3d00d4a9323fe175d9359ee9b86cbf21b2ce922636504d1438c6fbf1938e1e0
+
+tasks:
+  check:
+    desc: Check required tools
+    cmds:
+      - |
+        for cmd in kind kubectl docker curl jq; do
+          command -v $cmd >/dev/null || { echo "ERROR: $cmd is not installed"; exit 1; }
+        done
+        echo "Tools present."
+
+  registry:
+    desc: Start the local registry container (kind recipe)
+    cmds:
+      - |
+        if [ "$(docker inspect -f '{{"{{"}}.State.Running{{"}}"}}' {{.REG_NAME}} 2>/dev/null || true)" != "true" ]; then
+          docker run -d --restart=always -p "127.0.0.1:{{.REG_PORT}}:5000" --network bridge --name {{.REG_NAME}} {{.REGISTRY_IMAGE}}
+        fi
+
+  cluster:
+    desc: Create the kind cluster and wire it to the registry
+    deps: [check, registry]
+    cmds:
+      - kind get clusters 2>/dev/null | grep -qx {{.CLUSTER}} || kind create cluster --config kubernetes/cluster/kind.yaml --wait 120s
+      - |
+        for node in $(kind get nodes --name {{.CLUSTER}}); do
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/{{.REGISTRY}}
+          printf '[host."http://{{.REG_NAME}}:5000"]\n' | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/{{.REGISTRY}}/hosts.toml
+        done
+      - |
+        if [ "$(docker inspect -f '{{"{{"}}json .NetworkSettings.Networks.kind{{"}}"}}' {{.REG_NAME}})" = "null" ]; then
+          docker network connect kind {{.REG_NAME}}
+        fi
+      - kubectl --context {{.CTX}} create namespace {{.NS}} --dry-run=client -o yaml | kubectl --context {{.CTX}} apply -f -
+
+  model:
+    desc: Download the model files at a pinned revision
+    cmds:
+      - mkdir -p {{.MODEL_DIR}}
+      - |
+        for f in {{.MODEL_FILES}}; do
+          [ -s "{{.MODEL_DIR}}/$f" ] || curl -fsSL -o "{{.MODEL_DIR}}/$f" "https://huggingface.co/{{.MODEL}}/resolve/{{.MODEL_REV}}/$f"
+        done
+        du -sh {{.MODEL_DIR}}
+    status:
+      - test -s {{.MODEL_DIR}}/model.safetensors
+
+  images:
+    desc: Build and push the weights image and the vLLM image to the local registry
+    deps: [model]
+    cmds:
+      - rm -rf images/weights/model && cp -R {{.MODEL_DIR}} images/weights/model
+      - docker build --platform linux/arm64 -t {{.WEIGHTS_IMAGE}} images/weights
+      - docker push {{.WEIGHTS_IMAGE}}
+      - docker pull {{.VLLM_IMAGE}}
+      - docker tag {{.VLLM_IMAGE}} {{.REGISTRY}}/vllm/vllm-openai-cpu:v0.33.0
+      - docker push {{.REGISTRY}}/vllm/vllm-openai-cpu:v0.33.0
+      - rm -rf images/weights/model
+
+  up:
+    desc: Full setup
+    cmds:
+      - task: cluster
+      - task: images
+      - task: images
+        vars: {SIZE: 1.5b}
+      - task: populate
+      - task: populate
+        vars: {SIZE: 1.5b}
+
+  populate:
+    desc: 'In-cluster HTTP mirror, PVC and populate Job (SIZE=0.5b|1.5b)'
+    cmds:
+      - SIZE={{.SIZE}} ./scripts/run.sh populate x
+
+  run:
+    desc: 'One vLLM pod to Ready with a phase timeline (M=imagevolume|pvc|lan|hf, ID=run id)'
+    cmds:
+      - SIZE={{.SIZE}} ./scripts/run.sh {{.M}} {{.ID | default "1"}}
+
+  delivery:
+    desc: 'Delivery-only round, both sizes, results in results/delivery.tsv (R=round, HF=1 adds the Hub)'
+    cmds:
+      - HF={{.HF | default "0"}} ./scripts/delivery.sh {{.R | default "1"}}
+
+  cold:
+    desc: Print the command that evicts the weights images from the worker
+    cmds:
+      # printed, not run: removing images is left to the operator
+      - echo 'docker exec {{.CLUSTER}}-worker crictl rmi {{.REGISTRY}}/weights/qwen2.5-0.5b:v1 {{.REGISTRY}}/weights/qwen2.5-1.5b:v1'

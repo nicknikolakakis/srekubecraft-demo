@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen
+  namespace: models
+spec:
+  selector:
+    app.kubernetes.io/name: qwen
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# one completion request, prints the text and the time to first byte
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: probe
+  namespace: models
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: curl
+          image: curlimages/curl:8.17.0
+          args:
+            - -s
+            - -w
+            - "\nttfb=%{time_starttransfer}s\n"
+            - http://qwen:8000/v1/completions
+            - -H
+            - "Content-Type: application/json"
+            - -d
+            - '{"model":"qwen","prompt":"Kubernetes is","max_tokens":20}'
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi

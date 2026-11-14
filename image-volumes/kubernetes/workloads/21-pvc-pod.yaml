@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen-pvc
+  namespace: models
+  labels:
+    app.kubernetes.io/name: qwen
+    demo/method: pvc
+spec:
+  nodeSelector:
+    demo/role: model
+  containers:
+    - name: vllm
+      image: localhost:5001/vllm/vllm-openai-cpu:v0.33.0
+      imagePullPolicy: IfNotPresent
+      args: ["/models", "--served-model-name", "qwen", "--dtype", "bfloat16", "--max-model-len", "2048", "--port", "8000"]
+      env:
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "2"
+      ports:
+        - containerPort: 8000
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 6Gi
+        limits:
+          # 1.5B OOMs at 8Gi on the CPU backend
+          memory: 12Gi
+      volumeMounts:
+        - name: weights
+          mountPath: /models
+          readOnly: true
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: weights
+      persistentVolumeClaim:
+        claimName: qwen-weights
+        readOnly: true
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi

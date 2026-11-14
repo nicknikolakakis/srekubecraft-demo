@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen-download
+  namespace: models
+  labels:
+    app.kubernetes.io/name: qwen
+    demo/method: init-download
+spec:
+  nodeSelector:
+    demo/role: model
+  initContainers:
+    - name: fetch
+      image: curlimages/curl:8.17.0
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          for f in $FILES; do curl -fsSL -o "/models/$f" "$BASE_URL/$f"; done
+          ls -l /models
+      env:
+        # Taskfile swaps this for the in-cluster mirror on the LAN run
+        - name: BASE_URL
+          value: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/7ae557604adf67be50417f59c2c2f167def9a775
+        - name: FILES
+          value: config.json generation_config.json merges.txt model.safetensors tokenizer.json tokenizer_config.json vocab.json
+      resources:
+        requests:
+          cpu: 500m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+      volumeMounts:
+        - name: weights
+          mountPath: /models
+  containers:
+    - name: vllm
+      image: localhost:5001/vllm/vllm-openai-cpu:v0.33.0
+      imagePullPolicy: IfNotPresent
+      args: ["/models", "--served-model-name", "qwen", "--dtype", "bfloat16", "--max-model-len", "2048", "--port", "8000"]
+      env:
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "2"
+      ports:
+        - containerPort: 8000
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 6Gi
+        limits:
+          # 1.5B OOMs at 8Gi on the CPU backend
+          memory: 12Gi
+      volumeMounts:
+        - name: weights
+          mountPath: /models
+          readOnly: true
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: weights
+      emptyDir:
+        sizeLimit: 4Gi
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi

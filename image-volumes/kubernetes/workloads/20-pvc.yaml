@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qwen-weights
+  namespace: models
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 2Gi
+---
+# one-off populate step, timed separately from pod start
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate
+  namespace: models
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        demo/role: model
+      containers:
+        - name: fetch
+          image: curlimages/curl:8.17.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              for f in $FILES; do curl -fsSL -o "/models/$f" "http://fileserver/$f"; done
+              ls -l /models
+          env:
+            - name: FILES
+              value: config.json generation_config.json merges.txt model.safetensors tokenizer.json tokenizer_config.json vocab.json
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 500m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: weights
+              mountPath: /models
+      volumes:
+        - name: weights
+          persistentVolumeClaim:
+            claimName: qwen-weights
